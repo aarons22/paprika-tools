@@ -118,9 +118,12 @@ $HOME/.local/bin/paprika-mcp --help
 
 | Tool | Description |
 |------|-------------|
-| `get_sync_status` | Get change counters for all resource types |
-| `list_recipes` | List all recipes as lightweight `{uid, hash}` pairs |
-| `get_recipe(uid)` | Get full recipe details by UID |
+| `get_sync_status` | Get Paprika cloud change counters for all resource types |
+| `get_local_sync_status` | Get local SQLite cache status and recipe counts |
+| `sync_recipes` / `sync_now` | Sync changed Paprika recipes into SQLite |
+| `list_recipes` | List locally cached recipes as lightweight `{uid, hash, name}` rows |
+| `get_recipe(uid)` | Get full locally cached recipe details by UID |
+| `search_recipes(query, limit?)` | Search locally cached recipes |
 | `list_categories` | List all recipe categories |
 | `list_grocery_lists` | List all grocery lists |
 | `list_grocery_items(list_uid, include_checked?)` | List grocery items for a specific list |
@@ -132,12 +135,26 @@ $HOME/.local/bin/paprika-mcp --help
 
 - Config: `~/Library/Application Support/paprika-mcp/config.toml`
 - Token cache: `~/Library/Application Support/paprika-mcp/.paprika_token.json`
+- SQLite cache: `~/Library/Application Support/paprika-mcp/paprika.sqlite`
 - Stdout log: `~/Library/Logs/paprika-mcp.out.log`
 - Stderr log: `~/Library/Logs/paprika-mcp.err.log`
 
+Environment variables:
+
+- `PAPRIKA_EMAIL`: Paprika account email
+- `PAPRIKA_PASSWORD`: Paprika account password
+- `PAPRIKA_HOST`: HTTP bind host for the MCP server, defaults to `127.0.0.1`
+- `PAPRIKA_PORT`: HTTP bind port for the MCP server, defaults to `8000`
+- `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory
+
+Recipe tools read from SQLite to reduce Paprika sync API calls. Run
+`sync_recipes` or `sync_now` to populate or refresh the local cache. The sync
+uses Paprika's lightweight `{uid, hash}` recipe list and fetches full recipe
+data only for recipes that are new or changed.
+
 ### Notes
 
-- Mostly read-only; `add_grocery_item` is the only write tool
+- Mostly read-only; `sync_recipes`, `sync_now`, and `add_grocery_item` are the only write tools
 - The Paprika API is unofficial and undocumented; see [`API_REFERENCE.md`](./API_REFERENCE.md) for details
 - Tokens are cached on disk and refreshed automatically on 401
 

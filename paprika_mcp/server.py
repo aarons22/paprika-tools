@@ -2,6 +2,7 @@ from fastmcp import FastMCP
 
 from .client import PaprikaClient
 from .config import get_settings, token_cache_path
+from .local_store import PaprikaLocalStore
 
 mcp = FastMCP("Paprika Recipe Manager")
 
@@ -17,6 +18,11 @@ def _client() -> PaprikaClient:
     )
 
 
+def _store() -> PaprikaLocalStore:
+    settings = get_settings()
+    return PaprikaLocalStore(settings.paprika_db_path)
+
+
 @mcp.tool()
 def get_sync_status() -> dict:
     """Get sync status counters for all Paprika resource types.
@@ -29,99 +35,116 @@ def get_sync_status() -> dict:
 
 
 @mcp.tool()
-def list_recipes() -> list[dict]:
-    """List all recipes as lightweight {uid, hash} pairs.
+def get_local_sync_status() -> dict:
+    """Get local SQLite sync status and cached recipe counts."""
+    return _store().sync_status()
 
-    Returns only uid and hash for each recipe — not full recipe data.
-    Use get_recipe(uid) to fetch complete details for a specific recipe.
-    The hash field can be used to detect changes without re-fetching unchanged recipes.
+
+@mcp.tool()
+def sync_recipes() -> dict:
+    """Sync changed Paprika recipes into the local SQLite database.
+
+    This calls Paprika's lightweight recipe list endpoint, compares remote
+    hashes against the local SQLite cache, and fetches full recipe data only
+    for recipes that are new or changed.
     """
-    return _client().list_recipes()
+    summary = _store().sync_recipes(_client())
+    return {
+        "total_remote": summary.total_remote,
+        "fetched": summary.fetched,
+        "unchanged": summary.unchanged,
+        "removed": summary.removed,
+        "failed": summary.failed,
+        "failures": summary.failures,
+    }
+
+
+@mcp.tool()
+def sync_now() -> dict:
+    """Sync recipes and read-only resource lists into the local SQLite database."""
+    return _store().sync_all(_client())
+
+
+@mcp.tool()
+def list_recipes() -> list[dict]:
+    """List locally synced recipes as lightweight {uid, hash, name} rows.
+
+    This reads from SQLite and does not call Paprika's cloud API. Run
+    sync_recipes() first to populate or refresh the local cache.
+    """
+    return _store().list_recipes()
 
 
 @mcp.tool()
 def get_recipe(uid: str) -> dict:
-    """Get full details for a specific recipe by its UID.
+    """Get locally synced full details for a specific recipe by UID.
 
-    Returns the complete recipe object including name, ingredients, directions,
-    notes, nutrition, timing, rating, categories, source, and metadata.
+    This reads from SQLite and does not call Paprika's cloud API. Run
+    sync_recipes() first to populate or refresh the local cache.
 
     Args:
         uid: The recipe's unique identifier (uppercase UUID4 format).
     """
-    return _client().get_recipe(uid)
+    recipe = _store().get_recipe(uid)
+    if recipe is None:
+        raise ValueError(f"Recipe not found in local cache: {uid}")
+    return recipe
+
+
+@mcp.tool()
+def search_recipes(query: str, limit: int = 25) -> list[dict]:
+    """Search locally synced recipes by name, ingredients, directions, source, or categories.
+
+    This reads from SQLite and does not call Paprika's cloud API. Run
+    sync_recipes() first to populate or refresh the local cache.
+    """
+    return _store().search_recipes(query=query, limit=limit)
 
 
 @mcp.tool()
 def list_categories() -> list[dict]:
-    """List all recipe categories.
+    """List locally synced recipe categories.
 
-    Returns category uid, name, order_flag, and parent_uid (for nested categories).
-    Recipe objects reference categories by name, not UID.
+    Run sync_now() first to populate or refresh the local cache.
     """
-    return _client().list_categories()
+    return _store().list_resources("categories")
 
 
 @mcp.tool()
 def list_grocery_lists() -> list[dict]:
-    """List all grocery lists.
+    """List locally synced grocery lists.
 
-    Returns each list's uid, name, order_flag, is_default, and reminders_list fields.
-    Use the uid from this response to filter grocery items by list.
+    Run sync_now() first to populate or refresh the local cache.
     """
-    return _client().list_grocery_lists()
+    return _store().list_resources("grocery_lists")
 
 
 @mcp.tool()
 def list_grocery_items(list_uid: str, include_checked: bool = False) -> list[dict]:
-    """List grocery items for a specific grocery list.
+    """List locally synced grocery items for a specific grocery list.
 
-    Returns items with name, quantity, ingredient, aisle, purchased status,
-    recipe reference, and list membership.
+    Run sync_now() first to populate or refresh the local cache.
 
     Args:
         list_uid: Grocery list UID to filter items.
         include_checked: Include checked/purchased items when true.
     """
-    items = _client().list_grocery_items()
-    items = [item for item in items if item.get("list_uid") == list_uid]
-    if not include_checked:
-        items = [item for item in items if not item.get("purchased")]
-    return items
+    return _store().list_grocery_items(list_uid, include_checked)
 
 
 @mcp.tool()
 def list_meal_plans(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
-    """List meal plan entries, optionally filtered by date range.
+    """List locally synced meal plan entries, optionally filtered by date range.
 
-    Returns meal entries with name, date, meal type, and optional recipe reference.
-    Each entry includes a human-readable meal_type_name field in addition to the
-    numeric type field (0=Breakfast, 1=Lunch, 2=Dinner, 3=Snack).
+    Each entry includes a human-readable meal_type_name field in addition to
+    the numeric type field (0=Breakfast, 1=Lunch, 2=Dinner, 3=Snack). Run
+    sync_now() first to populate or refresh the local cache.
 
     Args:
         start_date: Optional start date (YYYY-MM-DD) inclusive.
         end_date: Optional end date (YYYY-MM-DD) inclusive.
     """
-    meals = _client().list_meal_plans()
-    if start_date or end_date:
-        from datetime import date
-
-        start = date.fromisoformat(start_date) if start_date else None
-        end = date.fromisoformat(end_date) if end_date else None
-
-        filtered: list[dict] = []
-        for meal in meals:
-            meal_date_str = meal.get("date", "").split(" ")[0]
-            try:
-                meal_date = date.fromisoformat(meal_date_str)
-            except Exception:
-                continue
-            if start and meal_date < start:
-                continue
-            if end and meal_date > end:
-                continue
-            filtered.append(meal)
-        meals = filtered
+    meals = _store().list_meal_plans(start_date, end_date)
     for meal in meals:
         meal["meal_type_name"] = MEAL_TYPES.get(meal.get("type"), "Unknown")
     return meals
@@ -129,11 +152,11 @@ def list_meal_plans(start_date: str | None = None, end_date: str | None = None) 
 
 @mcp.tool()
 def get_meals_for_date(date: str) -> list[dict]:
-    """Get meal plan entries for a specific date (YYYY-MM-DD).
+    """Get locally synced meal plan entries for a specific date (YYYY-MM-DD).
 
     Returns meals scheduled on the given date with an added meal_type_name field.
     """
-    meals = _client().list_meal_plans()
+    meals = _store().list_meal_plans(date, date)
     filtered: list[dict] = []
     for meal in meals:
         meal_date = meal.get("date", "").split(" ")[0]
@@ -174,7 +197,7 @@ def add_grocery_item(
 
 def main() -> None:
     settings = get_settings()
-    mcp.run(transport="http", host="127.0.0.1", port=settings.paprika_port)
+    mcp.run(transport="http", host=settings.paprika_host, port=settings.paprika_port)
 
 
 if __name__ == "__main__":

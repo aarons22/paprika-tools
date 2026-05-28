@@ -19,6 +19,8 @@ class Settings:
     paprika_email: str
     paprika_password: str
     paprika_port: int = 8000
+    paprika_host: str = "127.0.0.1"
+    paprika_db_path: Path = CONFIG_DIR / "paprika.sqlite"
 
 
 def ensure_config_dir() -> None:
@@ -46,6 +48,8 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
     email = paprika.get("email")
     password = paprika.get("password")
     port = paprika.get("port", 8000)
+    host = paprika.get("host", "127.0.0.1")
+    db_path = paprika.get("db_path")
 
     import os
 
@@ -54,12 +58,16 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
     env_port = os.getenv("PAPRIKA_PORT")
     if env_port:
         port = env_port
+    host = os.getenv("PAPRIKA_HOST", host)
+    db_path = os.getenv("PAPRIKA_DB_PATH", db_path)
 
     if overrides:
         email = overrides.get("email", email)
         password = overrides.get("password", password)
         if "port" in overrides and overrides["port"] is not None:
             port = overrides["port"]
+        host = overrides.get("host", host)
+        db_path = overrides.get("db_path", db_path)
 
     if not email or not password:
         raise ValueError("Missing Paprika credentials. Run 'paprika-mcp setup'.")
@@ -69,7 +77,17 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
     except Exception as exc:
         raise ValueError(f"Invalid port: {port}") from exc
 
-    return Settings(paprika_email=email, paprika_password=password, paprika_port=port)
+    resolved_db_path = Path(db_path).expanduser() if db_path else CONFIG_DIR / "paprika.sqlite"
+    if not resolved_db_path.is_absolute():
+        resolved_db_path = CONFIG_DIR / resolved_db_path
+
+    return Settings(
+        paprika_email=email,
+        paprika_password=password,
+        paprika_port=port,
+        paprika_host=str(host),
+        paprika_db_path=resolved_db_path,
+    )
 
 
 def token_cache_path() -> Path:

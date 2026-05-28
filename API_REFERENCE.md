@@ -41,7 +41,7 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
   - `aisle` is always sent as an empty string to allow Paprika auto-assignment.
 
 **Core read tools:**
-- `get_sync_status`, `list_recipes`, `get_recipe`, `list_categories`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
+- `get_sync_status`, `get_local_sync_status`, `sync_recipes`, `sync_now`, `list_recipes`, `get_recipe`, `search_recipes`, `list_categories`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
 
 **CLI update helper:**
 - `paprika-mcp update` pulls the latest git changes, reinstalls the package, and restarts the LaunchAgent if installed.
@@ -79,6 +79,7 @@ email=user@example.com&password=userpassword
 - Use HTTP Basic Auth + form data
 - More stable than V2, avoids "Unrecognized client" errors
 - Token cached to `~/Library/Application Support/paprika-mcp/.paprika_token.json` with 600 permissions
+- Recipe data cached to SQLite at `~/Library/Application Support/paprika-mcp/paprika.sqlite` by default, or `PAPRIKA_DB_PATH` when set.
 
 ---
 
@@ -298,6 +299,15 @@ Authorization: Bearer <token>
 ### Recipes
 
 The recipe API uses a two-step sync pattern: a lightweight list endpoint returns `{uid, hash}` pairs for change detection, and individual recipe details must be fetched one at a time.
+
+The MCP server implements this as a local SQLite sync cache:
+
+1. `sync_recipes` / `sync_now` calls `GET /v2/sync/recipes/`.
+2. It compares remote `{uid, hash}` pairs against local SQLite rows.
+3. It fetches `GET /v2/sync/recipe/{uid}/` only for recipes that are new or whose hash changed.
+4. `list_recipes`, `get_recipe`, and `search_recipes` read from SQLite and do not call Paprika's cloud API.
+
+This reduces repeated sync API calls and helps avoid transient `503` or suspected rate-limit failures.
 
 **Sources:** [Matt Steele's Paprika API Gist](https://gist.github.com/mattdsteele/7386ec363badfdeaad05a418b9a1f30a), [paprika-recipes Python library](https://github.com/coddingtonbear/paprika-recipes), [paprika-rs Rust client](https://github.com/Syfaro/paprika-rs)
 
