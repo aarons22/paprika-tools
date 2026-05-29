@@ -153,6 +153,13 @@ Recipe tools read from SQLite to reduce Paprika sync API calls. Run
 uses Paprika's lightweight `{uid, hash}` recipe list and fetches full recipe
 data only for recipes that are new or changed.
 
+The local cache uses a migrated schema that keeps current MCP reads stable while
+mirroring Paprika sync resources more closely. It stores per-resource tables for
+recipes, recipe categories, recipe photos, grocery lists/items/aisles/
+ingredients, meal plans/types, menus/items, bookmarks, and pantry items. Rows
+include Paprika-style sync state columns such as `status`, `is_synced`, and
+`sync_hash` where applicable; existing cache databases migrate in place.
+
 The MCP client sends Paprika-compatible request headers by default:
 `User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
 and `Accept-Encoding: gzip, deflate`. The User-Agent can also be set as

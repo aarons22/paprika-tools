@@ -46,6 +46,12 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
 **CLI update helper:**
 - `paprika-mcp update` pulls the latest git changes, reinstalls the package, and restarts the LaunchAgent if installed.
 
+**Local cache schema:**
+- Existing cache databases migrate in place; deleting `paprika.sqlite` is not required.
+- The cache keeps a legacy `resources` table for compatibility and also stores resource-specific tables for known Paprika sync groups.
+- Resource rows include `status`, `is_synced`, and `sync_hash` columns where applicable.
+- Represented tables include `recipes`, `recipe_photos`, `recipe_categories`, `recipes_to_categories`, `grocery_lists`, `grocery_aisles`, `grocery_ingredients`, `grocery_items`, `meal_types`, `meals`, `menus`, `menu_items`, `bookmarks`, `pantry_items`, and `sync_status`.
+
 ---
 
 ## Paprika Recipe Manager API
