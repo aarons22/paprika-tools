@@ -3,9 +3,10 @@ from __future__ import annotations
 import base64
 from typing import Any
 
+import pytest
 import httpx
 
-from paprika_mcp.client import DEFAULT_USER_AGENT, PaprikaClient
+from paprika_mcp.client import DEFAULT_USER_AGENT, PaprikaClient, PaprikaRetryExhausted
 
 
 def response(status_code: int = 200, json: Any | None = None) -> httpx.Response:
@@ -103,3 +104,59 @@ def test_request_headers_override_defaults(monkeypatch) -> None:
     assert headers["Authorization"] == "Bearer cached-token"
     assert headers["User-Agent"] == "per-call"
     assert headers["Accept-Encoding"] == "gzip, deflate"
+
+
+def test_503_retries_then_succeeds(monkeypatch) -> None:
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def fake_request(method: str, url: str, **kwargs) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return response(503, json={"error": "busy"})
+        return response(json={"result": {"recipes": 1}})
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    client = PaprikaClient(
+        email="user@example.test",
+        password="secret",
+        max_retries=2,
+        retry_backoff_base=0.1,
+        retry_jitter=0,
+        sleep=sleeps.append,
+    )
+    client._token = "cached-token"
+
+    assert client.get_sync_status() == {"recipes": 1}
+    assert len(calls) == 2
+    assert sleeps == [0.1]
+
+
+def test_503_retry_budget_exhaustion(monkeypatch) -> None:
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def fake_request(method: str, url: str, **kwargs) -> httpx.Response:
+        calls.append(1)
+        return response(503, json={"error": "busy"})
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    client = PaprikaClient(
+        email="user@example.test",
+        password="secret",
+        max_retries=2,
+        retry_backoff_base=0.1,
+        retry_jitter=0,
+        sleep=sleeps.append,
+    )
+    client._token = "cached-token"
+
+    with pytest.raises(PaprikaRetryExhausted) as exc:
+        client.get_sync_status()
+
+    assert exc.value.status_code == 503
+    assert exc.value.attempts == 3
+    assert len(calls) == 3
+    assert sleeps == [0.1, 0.2]

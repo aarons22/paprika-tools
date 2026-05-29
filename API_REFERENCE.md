@@ -51,6 +51,8 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
 - The cache keeps a legacy `resources` table for compatibility and also stores resource-specific tables for known Paprika sync groups.
 - Resource rows include `status`, `is_synced`, and `sync_hash` columns where applicable.
 - Represented tables include `recipes`, `recipe_photos`, `recipe_categories`, `recipes_to_categories`, `grocery_lists`, `grocery_aisles`, `grocery_ingredients`, `grocery_items`, `meal_types`, `meals`, `menus`, `menu_items`, `bookmarks`, `pantry_items`, and `sync_status`.
+- `sync_now` stores remote resource revisions and skips unchanged groups on later runs.
+- `sync_recipes` checkpoints recipe detail progress in `recipe_sync_queue`; summaries include `fetched`, `skipped`, `pending`, and `failed` counts.
 
 ---
 
@@ -522,6 +524,26 @@ Authorization: Bearer <token>
 - Values are **change counters** that increment on modifications, not total counts
 - Useful for smart syncing: only fetch a resource type if its counter has changed since last check
 - Compare against previously stored values to detect which types need re-syncing
+- The MCP cache persists completed revisions in `sync_status` and exposes them as `resource_revisions` from `get_local_sync_status`.
+- Revision metadata is updated only after a resource group sync completes successfully.
+
+### Retry and Resume Behavior
+
+Paprika can return transient `503` responses during large syncs. The MCP client
+retries `503` responses with exponential backoff and jitter. Defaults can be
+overridden in the `[paprika]` config section or environment:
+
+| Setting | Environment | Default |
+|---|---|---|
+| `max_retries` | `PAPRIKA_MAX_RETRIES` | `3` |
+| `retry_backoff_base` | `PAPRIKA_RETRY_BACKOFF_BASE` | `1.0` |
+| `retry_backoff_max` | `PAPRIKA_RETRY_BACKOFF_MAX` | `30.0` |
+| `retry_jitter` | `PAPRIKA_RETRY_JITTER` | `0.25` |
+
+Recipe detail fetches are serial. Each stored recipe detail is checkpointed
+before the next detail request. If retries are exhausted, the current UID remains
+pending and the next `sync_recipes` or `sync_now` resumes from the unfinished
+queue instead of refetching completed details.
 
 ---
 

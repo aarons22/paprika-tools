@@ -147,18 +147,27 @@ Environment variables:
 - `PAPRIKA_PORT`: HTTP bind port for the MCP server, defaults to `8000`
 - `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory
 - `PAPRIKA_USER_AGENT`: Paprika API User-Agent, defaults to `Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
+- `PAPRIKA_MAX_RETRIES`: Retry count for retryable `503` responses, defaults to `3`
+- `PAPRIKA_RETRY_BACKOFF_BASE`: Initial retry delay in seconds, defaults to `1.0`
+- `PAPRIKA_RETRY_BACKOFF_MAX`: Maximum retry delay in seconds, defaults to `30.0`
+- `PAPRIKA_RETRY_JITTER`: Added random retry jitter in seconds, defaults to `0.25`
 
 Recipe tools read from SQLite to reduce Paprika sync API calls. Run
 `sync_recipes` or `sync_now` to populate or refresh the local cache. The sync
-uses Paprika's lightweight `{uid, hash}` recipe list and fetches full recipe
-data only for recipes that are new or changed.
+checks `/v2/sync/status/`, skips unchanged resource groups, uses Paprika's
+lightweight `{uid, hash}` recipe list, and fetches full recipe data only for
+recipes that are new or changed. Recipe detail progress is checkpointed after
+each stored recipe so interrupted syncs resume without refetching completed
+details.
 
 The local cache uses a migrated schema that keeps current MCP reads stable while
 mirroring Paprika sync resources more closely. It stores per-resource tables for
 recipes, recipe categories, recipe photos, grocery lists/items/aisles/
 ingredients, meal plans/types, menus/items, bookmarks, and pantry items. Rows
 include Paprika-style sync state columns such as `status`, `is_synced`, and
-`sync_hash` where applicable; existing cache databases migrate in place.
+`sync_hash` where applicable; existing cache databases migrate in place. Stored
+resource revisions and pending recipe-detail counts are visible through
+`get_local_sync_status`.
 
 The MCP client sends Paprika-compatible request headers by default:
 `User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`

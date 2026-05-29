@@ -8,8 +8,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
+from .client import PaprikaRetryExhausted
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
 
 DEFAULT_ROW_STATUS = "unmodified"
 DEFAULT_IS_SYNCED = 1
@@ -33,13 +35,30 @@ RESOURCE_SORT_COLUMNS = {
     "meals": "date",
 }
 
+RESOURCE_SYNC_GROUPS = [
+    ("categories", "categories", "list_categories"),
+    ("photos", "recipe_photos", "list_recipe_photos"),
+    ("grocerylists", "grocery_lists", "list_grocery_lists"),
+    ("groceryaisles", "grocery_aisles", "list_grocery_aisles"),
+    ("groceryingredients", "grocery_ingredients", "list_grocery_ingredients"),
+    ("groceries", "grocery_items", "list_grocery_items"),
+    ("mealtypes", "meal_types", "list_meal_types"),
+    ("meals", "meal_plans", "list_meal_plans"),
+    ("menus", "menus", "list_menus"),
+    ("menuitems", "menu_items", "list_menu_items"),
+    ("bookmarks", "bookmarks", "list_bookmarks"),
+    ("pantry", "pantry", "list_pantry_items"),
+]
+
 
 @dataclass(frozen=True)
 class RecipeSyncSummary:
     total_remote: int
     fetched: int
     unchanged: int
+    skipped: int
     removed: int
+    pending: int
     failed: int
     failures: list[dict[str, str]]
 
@@ -69,6 +88,14 @@ class PaprikaLocalStore:
                 CREATE TABLE IF NOT EXISTS sync_status (
                     name TEXT PRIMARY KEY,
                     revision INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS recipe_sync_queue (
+                    uid TEXT PRIMARY KEY,
+                    hash TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT,
                     updated_at TEXT NOT NULL
                 );
 
@@ -373,22 +400,42 @@ class PaprikaLocalStore:
         }
         now = utc_now()
         fetched = 0
-        unchanged = 0
         failures: list[dict[str, str]] = []
 
         with self._connect() as conn:
             local_hashes = self._local_hashes(conn)
-            for uid, remote_hash in remote_by_uid.items():
-                if uid in local_hashes and local_hashes[uid] == remote_hash:
-                    unchanged += 1
-                    continue
-                try:
-                    recipe = client.get_recipe(uid)
-                    self._upsert_recipe(conn, uid, remote_hash, recipe, now)
-                    fetched += 1
-                except Exception as exc:
-                    failures.append({"uid": uid, "error": str(exc)})
+            unchanged = sum(
+                1
+                for uid, remote_hash in remote_by_uid.items()
+                if uid in local_hashes and local_hashes[uid] == remote_hash
+            )
+            self._prepare_recipe_queue(conn, remote_by_uid, local_hashes, now)
+            pending_rows = self._pending_recipe_queue(conn)
 
+        retry_exhausted = False
+        for row in pending_rows:
+            uid = row["uid"]
+            remote_hash = row["hash"]
+            try:
+                recipe = client.get_recipe(uid)
+            except PaprikaRetryExhausted as exc:
+                retry_exhausted = True
+                failures.append({"uid": uid, "error": str(exc)})
+                with self._connect() as conn:
+                    self._mark_recipe_queue(conn, uid, "pending", str(exc))
+                break
+            except Exception as exc:
+                failures.append({"uid": uid, "error": str(exc)})
+                with self._connect() as conn:
+                    self._mark_recipe_queue(conn, uid, "failed", str(exc))
+                continue
+            with self._connect() as conn:
+                self._upsert_recipe(conn, uid, remote_hash, recipe, utc_now())
+                self._mark_recipe_queue(conn, uid, "complete", None)
+                fetched += 1
+
+        with self._connect() as conn:
+            pending = self._recipe_queue_count(conn, "pending")
             removed = self._remove_missing(conn, remote_by_uid.keys())
             self._set_metadata(conn, "last_recipe_sync_at", now)
             self._set_metadata(
@@ -399,9 +446,12 @@ class PaprikaLocalStore:
                         "total_remote": len(remote_by_uid),
                         "fetched": fetched,
                         "unchanged": unchanged,
+                        "skipped": unchanged,
                         "removed": removed,
+                        "pending": pending,
                         "failed": len(failures),
                         "failures": failures,
+                        "retry_exhausted": retry_exhausted,
                     },
                     sort_keys=True,
                 ),
@@ -411,34 +461,209 @@ class PaprikaLocalStore:
             total_remote=len(remote_by_uid),
             fetched=fetched,
             unchanged=unchanged,
+            skipped=unchanged,
             removed=removed,
+            pending=pending,
             failed=len(failures),
             failures=failures,
         )
 
     def sync_all(self, client: Any) -> dict[str, Any]:
-        recipes = self.sync_recipes(client)
-        resources = {
-            "categories": self.replace_resources("categories", client.list_categories()),
-            "grocery_lists": self.replace_resources(
-                "grocery_lists", client.list_grocery_lists()
-            ),
-            "grocery_items": self.replace_resources(
-                "grocery_items", client.list_grocery_items()
-            ),
-            "meal_plans": self.replace_resources("meal_plans", client.list_meal_plans()),
-        }
+        remote_revisions = self._remote_revisions(client)
+        resources: dict[str, dict[str, Any]] = {}
+
+        recipe_revision = remote_revisions.get("recipes")
+        if recipe_revision is not None and self._revision_unchanged(
+            "recipes", recipe_revision
+        ) and not self._has_unfinished_recipes():
+            recipes = self._skipped_recipe_summary()
+        else:
+            recipes = self.sync_recipes(client)
+            if recipe_revision is not None and recipes.pending == 0 and recipes.failed == 0:
+                self._set_revision("recipes", recipe_revision)
+
+        for revision_name, kind, method_name in RESOURCE_SYNC_GROUPS:
+            method = getattr(client, method_name, None)
+            if method is None:
+                continue
+            revision = remote_revisions.get(revision_name)
+            if revision is not None and self._revision_unchanged(revision_name, revision):
+                resources[kind] = {"count": self._resource_count(kind), "skipped": True}
+                continue
+            resources[kind] = self.replace_resources(kind, method())
+            if revision is not None:
+                self._set_revision(revision_name, revision)
+
         return {
             "recipes": {
                 "total_remote": recipes.total_remote,
                 "fetched": recipes.fetched,
                 "unchanged": recipes.unchanged,
+                "skipped": recipes.skipped,
                 "removed": recipes.removed,
+                "pending": recipes.pending,
                 "failed": recipes.failed,
                 "failures": recipes.failures,
             },
             "resources": resources,
         }
+
+    def _prepare_recipe_queue(
+        self,
+        conn: sqlite3.Connection,
+        remote_by_uid: dict[str, str | None],
+        local_hashes: dict[str, str | None],
+        now: str,
+    ) -> None:
+        remote_uids = set(remote_by_uid)
+        conn.execute(
+            "DELETE FROM recipe_sync_queue WHERE uid NOT IN (%s)"
+            % ",".join("?" for _ in remote_uids),
+            tuple(remote_uids),
+        ) if remote_uids else conn.execute("DELETE FROM recipe_sync_queue")
+        for uid, remote_hash in remote_by_uid.items():
+            if uid in local_hashes and local_hashes[uid] == remote_hash:
+                self._mark_recipe_queue(conn, uid, "complete", None, remote_hash)
+                continue
+            conn.execute(
+                """
+                INSERT INTO recipe_sync_queue (uid, hash, status, error, updated_at)
+                VALUES (?, ?, 'pending', NULL, ?)
+                ON CONFLICT(uid) DO UPDATE SET
+                    hash = excluded.hash,
+                    status = CASE
+                        WHEN recipe_sync_queue.hash IS NOT excluded.hash THEN 'pending'
+                        WHEN recipe_sync_queue.status = 'complete' THEN 'complete'
+                        ELSE 'pending'
+                    END,
+                    error = CASE
+                        WHEN recipe_sync_queue.status = 'complete'
+                             AND recipe_sync_queue.hash IS excluded.hash
+                        THEN recipe_sync_queue.error
+                        ELSE NULL
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (uid, remote_hash, now),
+            )
+
+    def _pending_recipe_queue(self, conn: sqlite3.Connection) -> list[sqlite3.Row]:
+        return conn.execute(
+            """
+            SELECT uid, hash
+            FROM recipe_sync_queue
+            WHERE status = 'pending'
+            ORDER BY uid
+            """
+        ).fetchall()
+
+    def _mark_recipe_queue(
+        self,
+        conn: sqlite3.Connection,
+        uid: str,
+        status: str,
+        error: str | None,
+        recipe_hash: str | None = None,
+    ) -> None:
+        if recipe_hash is None:
+            conn.execute(
+                """
+                UPDATE recipe_sync_queue
+                SET status = ?, error = ?, updated_at = ?
+                WHERE uid = ?
+                """,
+                (status, error, utc_now(), uid),
+            )
+            return
+        conn.execute(
+            """
+            INSERT INTO recipe_sync_queue (uid, hash, status, error, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(uid) DO UPDATE SET
+                hash = excluded.hash,
+                status = excluded.status,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            """,
+            (uid, recipe_hash, status, error, utc_now()),
+        )
+
+    def _recipe_queue_count(self, conn: sqlite3.Connection, status: str) -> int:
+        return int(
+            conn.execute(
+                "SELECT count(*) AS count FROM recipe_sync_queue WHERE status = ?",
+                (status,),
+            ).fetchone()["count"]
+        )
+
+    def _has_unfinished_recipes(self) -> bool:
+        with self._connect() as conn:
+            return (
+                int(
+                    conn.execute(
+                        """
+                        SELECT count(*) AS count
+                        FROM recipe_sync_queue
+                        WHERE status IN ('pending', 'failed')
+                        """
+                    ).fetchone()["count"]
+                )
+                > 0
+            )
+
+    def _skipped_recipe_summary(self) -> RecipeSyncSummary:
+        with self._connect() as conn:
+            recipe_count = int(
+                conn.execute(
+                    "SELECT count(*) AS count FROM recipes WHERE in_trash = 0"
+                ).fetchone()["count"]
+            )
+        return RecipeSyncSummary(
+            total_remote=recipe_count,
+            fetched=0,
+            unchanged=recipe_count,
+            skipped=recipe_count,
+            removed=0,
+            pending=0,
+            failed=0,
+            failures=[],
+        )
+
+    def _remote_revisions(self, client: Any) -> dict[str, int]:
+        get_sync_status = getattr(client, "get_sync_status", None)
+        if get_sync_status is None:
+            return {}
+        status = get_sync_status()
+        if not isinstance(status, dict):
+            return {}
+        revisions: dict[str, int] = {}
+        for name, revision in status.items():
+            try:
+                revisions[str(name)] = int(revision)
+            except (TypeError, ValueError):
+                continue
+        return revisions
+
+    def _revision_unchanged(self, name: str, revision: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT revision FROM sync_status WHERE name = ?",
+                (name,),
+            ).fetchone()
+        return bool(row and int(row["revision"]) == revision)
+
+    def _set_revision(self, name: str, revision: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sync_status (name, revision, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    revision = excluded.revision,
+                    updated_at = excluded.updated_at
+                """,
+                (name, revision, utc_now()),
+            )
 
     def replace_resources(self, kind: str, items: list[dict[str, Any]]) -> dict[str, int]:
         now = utc_now()
@@ -661,6 +886,13 @@ class PaprikaLocalStore:
             recipe_count = conn.execute(
                 "SELECT count(*) AS count FROM recipes WHERE in_trash = 0"
             ).fetchone()["count"]
+            revisions = {
+                row["name"]: row["revision"]
+                for row in conn.execute(
+                    "SELECT name, revision FROM sync_status ORDER BY name"
+                ).fetchall()
+            }
+            pending_recipe_count = self._recipe_queue_count(conn, "pending")
         return {
             "db_path": str(self.db_path),
             "recipe_count": recipe_count,
@@ -668,6 +900,8 @@ class PaprikaLocalStore:
             "grocery_list_count": self._resource_count("grocery_lists"),
             "grocery_item_count": self._resource_count("grocery_items"),
             "meal_plan_count": self._resource_count("meal_plans"),
+            "resource_revisions": revisions,
+            "pending_recipe_count": pending_recipe_count,
             "last_recipe_sync_at": metadata.get("last_recipe_sync_at"),
             "last_recipe_sync_summary": parse_json(metadata.get("last_recipe_sync_summary")),
         }

@@ -1,8 +1,10 @@
 import base64
 import gzip
 import json
+import random
+import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +18,15 @@ DEFAULT_HEADERS = {
 }
 
 
+class PaprikaRetryExhausted(RuntimeError):
+    """Raised when retryable Paprika server-pressure responses keep failing."""
+
+    def __init__(self, status_code: int, attempts: int) -> None:
+        super().__init__(f"Paprika request failed with {status_code} after {attempts} attempts")
+        self.status_code = status_code
+        self.attempts = attempts
+
+
 class PaprikaClient:
     """HTTP client for the Paprika Recipe Manager API."""
 
@@ -26,10 +37,20 @@ class PaprikaClient:
         token_cache_path: Path | None = None,
         user_agent: str | None = None,
         default_headers: Mapping[str, str] | None = None,
+        max_retries: int = 3,
+        retry_backoff_base: float = 1.0,
+        retry_backoff_max: float = 30.0,
+        retry_jitter: float = 0.25,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.email = email
         self.password = password
         self._default_headers = self._build_default_headers(user_agent, default_headers)
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_base = max(0.0, float(retry_backoff_base))
+        self.retry_backoff_max = max(0.0, float(retry_backoff_max))
+        self.retry_jitter = max(0.0, float(retry_jitter))
+        self._sleep = sleep
         self._token: Optional[str] = None
         self._token_cache_path = token_cache_path
         self._load_cached_token()
@@ -104,11 +125,28 @@ class PaprikaClient:
             self._authenticate()
         return self._token  # type: ignore[return-value]
 
+    def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        attempts = self.max_retries + 1
+        for attempt in range(attempts):
+            response = httpx.request(method, url, **kwargs)
+            if response.status_code != 503:
+                return response
+            if attempt == self.max_retries:
+                raise PaprikaRetryExhausted(response.status_code, attempts)
+            self._sleep(self._retry_delay(attempt))
+        raise PaprikaRetryExhausted(503, attempts)
+
+    def _retry_delay(self, attempt: int) -> float:
+        delay = min(self.retry_backoff_max, self.retry_backoff_base * (2**attempt))
+        if self.retry_jitter:
+            delay += random.uniform(0, self.retry_jitter)
+        return delay
+
     def _request(self, method: str, path: str, **kwargs) -> dict:
         """Make an authenticated request, retrying once on 401."""
         token = self._get_token()
         extra_headers = kwargs.pop("headers", None)
-        response = httpx.request(
+        response = self._send(
             method,
             f"{BASE_URL}{path}",
             headers=self._headers({"Authorization": f"Bearer {token}"}, extra_headers),
@@ -118,7 +156,7 @@ class PaprikaClient:
         if response.status_code == 401:
             self._token = None
             token = self._authenticate()
-            response = httpx.request(
+            response = self._send(
                 method,
                 f"{BASE_URL}{path}",
                 headers=self._headers({"Authorization": f"Bearer {token}"}, extra_headers),
@@ -150,17 +188,49 @@ class PaprikaClient:
         """Return all recipe categories."""
         return self._request("GET", "/v2/sync/categories/")["result"]
 
+    def list_recipe_photos(self) -> list:
+        """Return synced recipe photo metadata."""
+        return self._request("GET", "/v2/sync/photos/")["result"]
+
     def list_grocery_lists(self) -> list:
         """Return all grocery lists."""
         return self._request("GET", "/v2/sync/grocerylists/")["result"]
+
+    def list_grocery_aisles(self) -> list:
+        """Return all grocery aisles."""
+        return self._request("GET", "/v2/sync/groceryaisles/")["result"]
+
+    def list_grocery_ingredients(self) -> list:
+        """Return all grocery ingredients."""
+        return self._request("GET", "/v2/sync/groceryingredients/")["result"]
 
     def list_grocery_items(self) -> list:
         """Return all grocery items across all lists."""
         return self._request("GET", "/v2/sync/groceries/")["result"]
 
+    def list_meal_types(self) -> list:
+        """Return all meal types."""
+        return self._request("GET", "/v2/sync/mealtypes/")["result"]
+
     def list_meal_plans(self) -> list:
         """Return all meal plan entries."""
         return self._request("GET", "/v2/sync/meals/")["result"]
+
+    def list_menus(self) -> list:
+        """Return all menus."""
+        return self._request("GET", "/v2/sync/menus/")["result"]
+
+    def list_menu_items(self) -> list:
+        """Return all menu items."""
+        return self._request("GET", "/v2/sync/menuitems/")["result"]
+
+    def list_bookmarks(self) -> list:
+        """Return all bookmarks."""
+        return self._request("GET", "/v2/sync/bookmarks/")["result"]
+
+    def list_pantry_items(self) -> list:
+        """Return all pantry items."""
+        return self._request("GET", "/v2/sync/pantry/")["result"]
 
     def create_grocery_item(
         self,
