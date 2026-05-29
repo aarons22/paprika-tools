@@ -146,11 +146,17 @@ Environment variables:
 - `PAPRIKA_HOST`: HTTP bind host for the MCP server, defaults to `127.0.0.1`
 - `PAPRIKA_PORT`: HTTP bind port for the MCP server, defaults to `8000`
 - `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory
+- `PAPRIKA_USER_AGENT`: Paprika API User-Agent, defaults to `Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
 
 Recipe tools read from SQLite to reduce Paprika sync API calls. Run
 `sync_recipes` or `sync_now` to populate or refresh the local cache. The sync
 uses Paprika's lightweight `{uid, hash}` recipe list and fetches full recipe
 data only for recipes that are new or changed.
+
+The MCP client sends Paprika-compatible request headers by default:
+`User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
+and `Accept-Encoding: gzip, deflate`. The User-Agent can also be set as
+`user_agent` under the `[paprika]` config section.
 
 ### Notes
 

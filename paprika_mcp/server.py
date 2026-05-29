@@ -15,6 +15,7 @@ def _client() -> PaprikaClient:
         email=settings.paprika_email,
         password=settings.paprika_password,
         token_cache_path=token_cache_path(),
+        user_agent=settings.paprika_user_agent,
     )
 
 

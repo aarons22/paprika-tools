@@ -2,23 +2,58 @@ import base64
 import gzip
 import json
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
 import httpx
 
 BASE_URL = "https://www.paprikaapp.com/api"
+DEFAULT_USER_AGENT = "Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)"
+DEFAULT_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept-Encoding": "gzip, deflate",
+}
 
 
 class PaprikaClient:
     """HTTP client for the Paprika Recipe Manager API."""
 
-    def __init__(self, email: str, password: str, token_cache_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        token_cache_path: Path | None = None,
+        user_agent: str | None = None,
+        default_headers: Mapping[str, str] | None = None,
+    ) -> None:
         self.email = email
         self.password = password
+        self._default_headers = self._build_default_headers(user_agent, default_headers)
         self._token: Optional[str] = None
         self._token_cache_path = token_cache_path
         self._load_cached_token()
+
+    @staticmethod
+    def _build_default_headers(
+        user_agent: str | None,
+        overrides: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        headers = dict(DEFAULT_HEADERS)
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        if overrides:
+            headers.update(overrides)
+        return headers
+
+    def _headers(self, *header_groups: Mapping[str, str] | None) -> dict[str, str]:
+        headers = httpx.Headers(self._default_headers)
+        for group in header_groups:
+            if not group:
+                continue
+            for key, value in group.items():
+                headers[key] = value
+        return dict(headers)
 
     def _load_cached_token(self) -> None:
         if not self._token_cache_path:
@@ -50,10 +85,12 @@ class PaprikaClient:
         credentials = base64.b64encode(f"{self.email}:{self.password}".encode()).decode()
         response = httpx.post(
             f"{BASE_URL}/v1/account/login/",
-            headers={
-                "Authorization": f"Basic {credentials}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
+            headers=self._headers(
+                {
+                    "Authorization": f"Basic {credentials}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                }
+            ),
             data={"email": self.email, "password": self.password},
             timeout=30,
         )
@@ -70,10 +107,11 @@ class PaprikaClient:
     def _request(self, method: str, path: str, **kwargs) -> dict:
         """Make an authenticated request, retrying once on 401."""
         token = self._get_token()
+        extra_headers = kwargs.pop("headers", None)
         response = httpx.request(
             method,
             f"{BASE_URL}{path}",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=self._headers({"Authorization": f"Bearer {token}"}, extra_headers),
             timeout=30,
             **kwargs,
         )
@@ -83,7 +121,7 @@ class PaprikaClient:
             response = httpx.request(
                 method,
                 f"{BASE_URL}{path}",
-                headers={"Authorization": f"Bearer {token}"},
+                headers=self._headers({"Authorization": f"Bearer {token}"}, extra_headers),
                 timeout=30,
                 **kwargs,
             )

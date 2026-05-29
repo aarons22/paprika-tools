@@ -81,6 +81,21 @@ email=user@example.com&password=userpassword
 - Token cached to `~/Library/Application Support/paprika-mcp/.paprika_token.json` with 600 permissions
 - Recipe data cached to SQLite at `~/Library/Application Support/paprika-mcp/paprika.sqlite` by default, or `PAPRIKA_DB_PATH` when set.
 
+### Default Request Headers
+
+The MCP client sends Paprika-compatible defaults on login and sync requests:
+
+```http
+User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)
+Accept-Encoding: gzip, deflate
+```
+
+`httpx` handles gzip and deflate response decoding, and the client keeps a
+fallback gzip check for responses that arrive with compressed bytes still in the
+body. Override the User-Agent with `PAPRIKA_USER_AGENT` or `user_agent` in the
+`[paprika]` config section. Programmatic callers may pass `user_agent` or
+`default_headers` to `PaprikaClient`.
+
 ---
 
 ### Grocery Lists

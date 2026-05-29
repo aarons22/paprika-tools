@@ -9,6 +9,8 @@ try:
 except ModuleNotFoundError:  # Python < 3.11
     import tomli as toml
 
+from .client import DEFAULT_USER_AGENT
+
 CONFIG_DIR = Path.home() / "Library" / "Application Support" / "paprika-mcp"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 TOKEN_CACHE_FILE = CONFIG_DIR / ".paprika_token.json"
@@ -21,6 +23,7 @@ class Settings:
     paprika_port: int = 8000
     paprika_host: str = "127.0.0.1"
     paprika_db_path: Path = CONFIG_DIR / "paprika.sqlite"
+    paprika_user_agent: str = DEFAULT_USER_AGENT
 
 
 def ensure_config_dir() -> None:
@@ -50,6 +53,7 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
     port = paprika.get("port", 8000)
     host = paprika.get("host", "127.0.0.1")
     db_path = paprika.get("db_path")
+    user_agent = paprika.get("user_agent", DEFAULT_USER_AGENT)
 
     import os
 
@@ -60,6 +64,7 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         port = env_port
     host = os.getenv("PAPRIKA_HOST", host)
     db_path = os.getenv("PAPRIKA_DB_PATH", db_path)
+    user_agent = os.getenv("PAPRIKA_USER_AGENT", user_agent)
 
     if overrides:
         email = overrides.get("email", email)
@@ -68,6 +73,7 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
             port = overrides["port"]
         host = overrides.get("host", host)
         db_path = overrides.get("db_path", db_path)
+        user_agent = overrides.get("user_agent", user_agent)
 
     if not email or not password:
         raise ValueError("Missing Paprika credentials. Run 'paprika-mcp setup'.")
@@ -87,6 +93,7 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
         paprika_port=port,
         paprika_host=str(host),
         paprika_db_path=resolved_db_path,
+        paprika_user_agent=str(user_agent),
     )
 
 
