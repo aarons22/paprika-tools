@@ -41,7 +41,7 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
   - `aisle` is always sent as an empty string to allow Paprika auto-assignment.
 
 **Core read tools:**
-- `get_sync_status`, `get_local_sync_status`, `sync_recipes`, `sync_now`, `list_recipes`, `get_recipe`, `search_recipes`, `list_categories`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
+- `get_sync_status`, `get_local_sync_status`, `sync_recipes`, `sync_now`, `list_recipes`, `get_recipe`, `search_recipes`, `list_categories`, `list_recipe_photos`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
 
 **CLI update helper:**
 - `paprika-mcp update` pulls the latest git changes, reinstalls the package, and restarts the LaunchAgent if installed.
@@ -53,6 +53,7 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
 - Represented tables include `recipes`, `recipe_photos`, `recipe_categories`, `recipes_to_categories`, `grocery_lists`, `grocery_aisles`, `grocery_ingredients`, `grocery_items`, `meal_types`, `meals`, `menus`, `menu_items`, `bookmarks`, `pantry_items`, and `sync_status`.
 - `sync_now` stores remote resource revisions and skips unchanged groups on later runs.
 - `sync_recipes` checkpoints recipe detail progress in `recipe_sync_queue`; summaries include `fetched`, `skipped`, `pending`, and `failed` counts.
+- `list_recipe_photos(recipe_uid?)` exposes cached photo metadata only; default sync does not download image binaries.
 
 ---
 
@@ -478,6 +479,39 @@ data: <gzip-compressed JSON with in_trash=true>
 ```
 
 **Note:** No true DELETE endpoint exists for recipes.
+
+### Recipe Photos
+
+Photo metadata is synced separately from recipe JSON through
+`GET /v2/sync/photos/` when the `photos` revision changes. Default MCP sync
+stores metadata only in `recipe_photos` and does not request photo binary URLs or
+download image files.
+
+Tracked fields include:
+
+| Field | Description |
+|---|---|
+| `uid` | Photo metadata UID |
+| `name` / `filename` | Photo display name or server filename |
+| `photo_hash` | Server photo hash |
+| `recipe_uid` | Owning recipe UID |
+| `is_downloaded` | Whether a binary has been downloaded locally |
+| `is_download_errored` | Whether a previous binary download failed |
+| `download_error_message` | Stored download error text, when provided |
+| `is_uploaded` | Whether the photo is uploaded to Paprika |
+| `is_pending_deletion` | Whether the photo is pending deletion |
+| `sync_hash` | Paprika change token |
+
+Use `list_recipe_photos(recipe_uid?)` to inspect cached metadata. A future
+explicit opt-in path can download image binaries; normal `sync_recipes` and
+`sync_now` intentionally do not.
+
+### Sync Hash Generation
+
+Paprika `sync_hash` values are change tokens, not content hashes. Local create
+or modify paths should generate a fresh value by uppercasing a UUID4 string,
+hashing it with SHA256, and uppercasing the 64-character hex digest. After a
+successful sync, keep the server-provided value if Paprika returns one.
 
 #### Recommended Sync Workflow
 

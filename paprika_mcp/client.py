@@ -10,6 +10,8 @@ from typing import Optional
 
 import httpx
 
+from .sync_hash import generate_sync_hash
+
 BASE_URL = "https://www.paprikaapp.com/api"
 DEFAULT_USER_AGENT = "Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)"
 DEFAULT_HEADERS = {
@@ -258,6 +260,7 @@ class PaprikaClient:
             "quantity": quantity or "",
             "separate": separate,
             "list_uid": list_uid,
+            "sync_hash": generate_sync_hash(),
         }
         payload = gzip.compress(json.dumps([item]).encode("utf-8"))
         return self._request(

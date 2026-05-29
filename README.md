@@ -125,6 +125,7 @@ $HOME/.local/bin/paprika-mcp --help
 | `get_recipe(uid)` | Get full locally cached recipe details by UID |
 | `search_recipes(query, limit?)` | Search locally cached recipes |
 | `list_categories` | List all recipe categories |
+| `list_recipe_photos(recipe_uid?)` | List cached recipe photo metadata without image binaries |
 | `list_grocery_lists` | List all grocery lists |
 | `list_grocery_items(list_uid, include_checked?)` | List grocery items for a specific list |
 | `list_meal_plans(start_date?, end_date?)` | List meal plan entries, optionally filtered by date |
@@ -167,7 +168,14 @@ ingredients, meal plans/types, menus/items, bookmarks, and pantry items. Rows
 include Paprika-style sync state columns such as `status`, `is_synced`, and
 `sync_hash` where applicable; existing cache databases migrate in place. Stored
 resource revisions and pending recipe-detail counts are visible through
-`get_local_sync_status`.
+`get_local_sync_status`. Photo sync stores metadata such as filename, photo
+hash, recipe UID, download/upload flags, and error fields; default sync does not
+download image binaries.
+
+Local write payloads generate fresh Paprika-compatible `sync_hash` values as
+uppercase SHA256 hex digests of fresh uppercase UUID4 strings. Generate a new
+value for local create/modify operations, then keep any server-provided value
+after a successful sync.
 
 The MCP client sends Paprika-compatible request headers by default:
 `User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`

@@ -118,6 +118,18 @@ def list_categories() -> list[dict]:
 
 
 @mcp.tool()
+def list_recipe_photos(recipe_uid: str | None = None) -> list[dict]:
+    """List locally synced recipe photo metadata without image binaries.
+
+    Run sync_now() first to populate or refresh the local cache.
+
+    Args:
+        recipe_uid: Optional recipe UID to filter photo metadata.
+    """
+    return _store().list_recipe_photos(recipe_uid)
+
+
+@mcp.tool()
 def list_grocery_lists() -> list[dict]:
     """List locally synced grocery lists.
 

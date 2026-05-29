@@ -97,6 +97,38 @@ class RetryExhaustedPaprikaClient(FakePaprikaClient):
         raise PaprikaRetryExhausted(503, 3)
 
 
+class PhotoPaprikaClient(FakePaprikaClient):
+    def __init__(self, stubs: list[dict], recipes: dict[str, dict]) -> None:
+        super().__init__(stubs, recipes)
+        self.photo_calls = 0
+        self.download_photo_calls = 0
+
+    def get_sync_status(self) -> dict[str, int]:
+        return {"recipes": 1, "photos": 2}
+
+    def list_recipe_photos(self) -> list[dict]:
+        self.photo_calls += 1
+        return [
+            {
+                "uid": "p1",
+                "name": "front",
+                "filename": "front.jpg",
+                "photo_hash": "hash1",
+                "recipe_uid": "r1",
+                "is_downloaded": False,
+                "is_download_errored": True,
+                "download_error_message": "not downloaded",
+                "is_uploaded": True,
+                "is_pending_deletion": False,
+                "sync_hash": "A" * 64,
+            }
+        ]
+
+    def download_photo(self, uid: str) -> bytes:
+        self.download_photo_calls += 1
+        raise AssertionError(f"unexpected photo binary download: {uid}")
+
+
 def recipe(uid: str, name: str, ingredients: str = "1 cup flour") -> dict:
     return {
         "uid": uid,
@@ -495,3 +527,58 @@ def test_retry_exhaustion_preserves_pending_recipe_progress(tmp_path: Path) -> N
     assert second.pending == 0
     assert resumed.get_recipe_calls == ["r1"]
     assert local.get_recipe("r1")["name"] == "Pancakes"
+
+
+def test_sync_now_stores_photo_metadata_without_downloading_binaries(
+    tmp_path: Path,
+) -> None:
+    local = store(tmp_path)
+    client = PhotoPaprikaClient(
+        [{"uid": "r1", "hash": "h1"}],
+        {"r1": recipe("r1", "Pancakes")},
+    )
+
+    summary = local.sync_all(client)
+
+    assert summary["resources"]["recipe_photos"] == {"count": 1}
+    assert client.photo_calls == 1
+    assert client.download_photo_calls == 0
+    assert local.list_recipe_photos() == [
+        {
+            "uid": "p1",
+            "name": "front",
+            "filename": "front.jpg",
+            "photo_hash": "hash1",
+            "recipe_uid": "r1",
+            "is_downloaded": False,
+            "is_download_errored": True,
+            "download_error_message": "not downloaded",
+            "is_uploaded": True,
+            "is_pending_deletion": False,
+            "sync_hash": "A" * 64,
+        }
+    ]
+    assert local.list_recipe_photos("r1")[0]["uid"] == "p1"
+
+    with sqlite3.connect(local.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT filename, photo_hash, recipe_uid, is_downloaded,
+                   is_download_errored, download_error_message, is_uploaded,
+                   is_pending_deletion, sync_hash
+            FROM recipe_photos
+            WHERE uid = 'p1'
+            """
+        ).fetchone()
+
+    assert row == (
+        "front.jpg",
+        "hash1",
+        "r1",
+        0,
+        1,
+        "not downloaded",
+        1,
+        0,
+        "A" * 64,
+    )

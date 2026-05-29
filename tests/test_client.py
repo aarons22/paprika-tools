@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import gzip
+import json
 from typing import Any
 
 import pytest
@@ -160,3 +162,25 @@ def test_503_retry_budget_exhaustion(monkeypatch) -> None:
     assert exc.value.attempts == 3
     assert len(calls) == 3
     assert sleeps == [0.1, 0.2]
+
+
+def test_create_grocery_item_sends_fresh_sync_hash(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request(method: str, url: str, **kwargs) -> httpx.Response:
+        captured["files"] = kwargs["files"]
+        return response(json={"result": True})
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    client = PaprikaClient(email="user@example.test", password="secret")
+    client._token = "cached-token"
+
+    assert client.create_grocery_item("list-1", "Milk") == {"result": True}
+
+    payload = gzip.decompress(captured["files"]["data"][1])
+    items = json.loads(payload)
+    assert len(items) == 1
+    assert items[0]["sync_hash"]
+    assert len(items[0]["sync_hash"]) == 64
+    assert items[0]["sync_hash"] == items[0]["sync_hash"].upper()

@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from .client import PaprikaRetryExhausted
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DEFAULT_ROW_STATUS = "unmodified"
 DEFAULT_IS_SYNCED = 1
@@ -165,8 +165,11 @@ class PaprikaLocalStore:
                     filename TEXT,
                     photo_hash TEXT,
                     recipe_uid TEXT,
+                    download_error_message TEXT,
                     is_downloaded INTEGER NOT NULL DEFAULT 0,
+                    is_download_errored INTEGER NOT NULL DEFAULT 0,
                     is_uploaded INTEGER NOT NULL DEFAULT 1,
+                    is_pending_deletion INTEGER NOT NULL DEFAULT 0,
                     raw_json TEXT NOT NULL,
                     synced_at TEXT NOT NULL,
                     FOREIGN KEY (recipe_uid) REFERENCES recipes(uid) ON DELETE CASCADE
@@ -337,6 +340,15 @@ class PaprikaLocalStore:
                 "status": "TEXT NOT NULL DEFAULT 'unmodified'",
                 "is_synced": "INTEGER NOT NULL DEFAULT 1",
                 "sync_hash": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            conn,
+            "recipe_photos",
+            {
+                "download_error_message": "TEXT",
+                "is_download_errored": "INTEGER NOT NULL DEFAULT 0",
+                "is_pending_deletion": "INTEGER NOT NULL DEFAULT 0",
             },
         )
         if previous_version < 2:
@@ -765,8 +777,11 @@ class PaprikaLocalStore:
             "quantity": text(item.get("quantity")),
             "filename": text(item.get("filename") or item.get("photo")),
             "photo_hash": text(item.get("photo_hash")),
+            "download_error_message": text(item.get("download_error_message")),
             "is_downloaded": bool_int(item.get("is_downloaded")),
+            "is_download_errored": bool_int(item.get("is_download_errored")),
             "is_uploaded": bool_int(item.get("is_uploaded"), default=1),
+            "is_pending_deletion": bool_int(item.get("is_pending_deletion")),
         }
         columns = [
             row["name"]
@@ -809,6 +824,12 @@ class PaprikaLocalStore:
                     (kind,),
                 ).fetchall()
         return [json.loads(row["raw_json"]) for row in rows]
+
+    def list_recipe_photos(self, recipe_uid: str | None = None) -> list[dict[str, Any]]:
+        photos = self.list_resources("recipe_photos")
+        if recipe_uid is None:
+            return photos
+        return [photo for photo in photos if photo.get("recipe_uid") == recipe_uid]
 
     def list_grocery_items(
         self, list_uid: str, include_checked: bool = False
@@ -1138,6 +1159,8 @@ def parse_json(value: str | None) -> Any:
 def bool_int(value: Any, default: int = 0) -> int:
     if value is None:
         return default
+    if isinstance(value, str):
+        return 1 if value.strip().lower() in {"1", "true", "yes", "y"} else 0
     return 1 if bool(value) else 0
 
 
