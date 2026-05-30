@@ -41,10 +41,19 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
   - `aisle` is always sent as an empty string to allow Paprika auto-assignment.
 
 **Core read tools:**
-- `get_sync_status`, `list_recipes`, `get_recipe`, `list_categories`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
+- `get_sync_status`, `get_local_sync_status`, `sync_recipes`, `sync_now`, `list_recipes`, `get_recipe`, `search_recipes`, `list_categories`, `list_recipe_photos`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
 
 **CLI update helper:**
 - `paprika-mcp update` pulls the latest git changes, reinstalls the package, and restarts the LaunchAgent if installed.
+
+**Local cache schema:**
+- The cache stores resource-specific tables for known Paprika sync groups.
+- Resource rows include `status`, `is_synced`, and `sync_hash` columns where applicable.
+- Represented tables include `recipes`, `recipe_photos`, `recipe_categories`, `recipes_to_categories`, `grocery_lists`, `grocery_aisles`, `grocery_ingredients`, `grocery_items`, `meal_types`, `meals`, `menus`, `menu_items`, `bookmarks`, `pantry_items`, and `sync_status`.
+- `sync_now` stores remote resource revisions and skips unchanged groups on later runs.
+- `sync_recipes` checkpoints recipe detail progress in `recipe_sync_queue`; summaries include `fetched`, `skipped`, `pending`, and `failed` counts.
+- `list_recipe_photos(recipe_uid?)` exposes cached photo metadata only; default sync does not download image binaries.
+- If `/v2/sync/status/` fails after retries, `sync_now` proceeds without revision gating and reports `revision_status_error`.
 
 ---
 
@@ -79,6 +88,22 @@ email=user@example.com&password=userpassword
 - Use HTTP Basic Auth + form data
 - More stable than V2, avoids "Unrecognized client" errors
 - Token cached to `~/Library/Application Support/paprika-mcp/.paprika_token.json` with 600 permissions
+- Recipe data cached to SQLite at `~/Library/Application Support/paprika-mcp/paprika.sqlite` by default, or `PAPRIKA_DB_PATH` when set.
+
+### Default Request Headers
+
+The MCP client sends Paprika-compatible defaults on login and sync requests:
+
+```http
+User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)
+Accept-Encoding: gzip, deflate
+```
+
+`httpx` handles gzip and deflate response decoding, and the client keeps a
+fallback gzip check for responses that arrive with compressed bytes still in the
+body. Override the User-Agent with `PAPRIKA_USER_AGENT` or `user_agent` in the
+`[paprika]` config section. Programmatic callers may pass `user_agent` or
+`default_headers` to `PaprikaClient`.
 
 ---
 
@@ -299,6 +324,15 @@ Authorization: Bearer <token>
 
 The recipe API uses a two-step sync pattern: a lightweight list endpoint returns `{uid, hash}` pairs for change detection, and individual recipe details must be fetched one at a time.
 
+The MCP server implements this as a local SQLite sync cache:
+
+1. `sync_recipes` / `sync_now` calls `GET /v2/sync/recipes/`.
+2. It compares remote `{uid, hash}` pairs against local SQLite rows.
+3. It fetches `GET /v2/sync/recipe/{uid}/` only for recipes that are new or whose hash changed.
+4. `list_recipes`, `get_recipe`, and `search_recipes` read from SQLite and do not call Paprika's cloud API.
+
+This reduces repeated sync API calls and helps avoid transient `503` or suspected rate-limit failures.
+
 **Sources:** [Matt Steele's Paprika API Gist](https://gist.github.com/mattdsteele/7386ec363badfdeaad05a418b9a1f30a), [paprika-recipes Python library](https://github.com/coddingtonbear/paprika-recipes), [paprika-rs Rust client](https://github.com/Syfaro/paprika-rs)
 
 #### List All Recipes (Lightweight)
@@ -446,6 +480,39 @@ data: <gzip-compressed JSON with in_trash=true>
 
 **Note:** No true DELETE endpoint exists for recipes.
 
+### Recipe Photos
+
+Photo metadata is synced separately from recipe JSON through
+`GET /v2/sync/photos/` when the `photos` revision changes. Default MCP sync
+stores metadata only in `recipe_photos` and does not request photo binary URLs or
+download image files.
+
+Tracked fields include:
+
+| Field | Description |
+|---|---|
+| `uid` | Photo metadata UID |
+| `name` / `filename` | Photo display name or server filename |
+| `photo_hash` | Server photo hash |
+| `recipe_uid` | Owning recipe UID |
+| `is_downloaded` | Whether a binary has been downloaded locally |
+| `is_download_errored` | Whether a previous binary download failed |
+| `download_error_message` | Stored download error text, when provided |
+| `is_uploaded` | Whether the photo is uploaded to Paprika |
+| `is_pending_deletion` | Whether the photo is pending deletion |
+| `sync_hash` | Paprika change token |
+
+Use `list_recipe_photos(recipe_uid?)` to inspect cached metadata. A future
+explicit opt-in path can download image binaries; normal `sync_recipes` and
+`sync_now` intentionally do not.
+
+### Sync Hash Generation
+
+Paprika `sync_hash` values are change tokens, not content hashes. Local create
+or modify paths should generate a fresh value by uppercasing a UUID4 string,
+hashing it with SHA256, and uppercasing the 64-character hex digest. After a
+successful sync, keep the server-provided value if Paprika returns one.
+
 #### Recommended Sync Workflow
 
 1. **GET `/v2/sync/recipes/`** → get list of `{uid, hash}` pairs
@@ -491,6 +558,28 @@ Authorization: Bearer <token>
 - Values are **change counters** that increment on modifications, not total counts
 - Useful for smart syncing: only fetch a resource type if its counter has changed since last check
 - Compare against previously stored values to detect which types need re-syncing
+- The MCP cache persists completed revisions in `sync_status` and exposes them as `resource_revisions` from `get_local_sync_status`.
+- Revision metadata is updated only after a resource group sync completes successfully.
+
+### Retry and Resume Behavior
+
+Paprika can return transient `503` responses during large syncs, and long syncs
+can also hit transient transport errors such as connection failures or read
+timeouts. The MCP client retries those failures with exponential backoff and
+jitter. Defaults can be overridden in the `[paprika]` config section or
+environment:
+
+| Setting | Environment | Default |
+|---|---|---|
+| `max_retries` | `PAPRIKA_MAX_RETRIES` | `3` |
+| `retry_backoff_base` | `PAPRIKA_RETRY_BACKOFF_BASE` | `1.0` |
+| `retry_backoff_max` | `PAPRIKA_RETRY_BACKOFF_MAX` | `30.0` |
+| `retry_jitter` | `PAPRIKA_RETRY_JITTER` | `0.25` |
+
+Recipe detail fetches are serial. Each stored recipe detail is checkpointed
+before the next detail request. If retries are exhausted, the current UID remains
+pending and the next `sync_recipes` or `sync_now` resumes from the unfinished
+queue instead of refetching completed details.
 
 ---
 

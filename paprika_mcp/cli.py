@@ -43,7 +43,17 @@ def cmd_setup(args: argparse.Namespace) -> int:
     save_config(email=email, password=password, port=port)
 
     try:
-        client = PaprikaClient(email=email, password=password, token_cache_path=token_cache_path())
+        settings = get_settings()
+        client = PaprikaClient(
+            email=email,
+            password=password,
+            token_cache_path=token_cache_path(),
+            user_agent=settings.paprika_user_agent,
+            max_retries=settings.paprika_max_retries,
+            retry_backoff_base=settings.paprika_retry_backoff_base,
+            retry_backoff_max=settings.paprika_retry_backoff_max,
+            retry_jitter=settings.paprika_retry_jitter,
+        )
         client.get_sync_status()
         _print("✅ Credentials verified and config saved.")
         _print(f"Config: {CONFIG_FILE}")

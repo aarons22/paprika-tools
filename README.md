@@ -118,10 +118,14 @@ $HOME/.local/bin/paprika-mcp --help
 
 | Tool | Description |
 |------|-------------|
-| `get_sync_status` | Get change counters for all resource types |
-| `list_recipes` | List all recipes as lightweight `{uid, hash}` pairs |
-| `get_recipe(uid)` | Get full recipe details by UID |
+| `get_sync_status` | Get Paprika cloud change counters for all resource types |
+| `get_local_sync_status` | Get local SQLite cache status and recipe counts |
+| `sync_recipes` / `sync_now` | Sync changed Paprika recipes into SQLite |
+| `list_recipes` | List locally cached recipes as lightweight `{uid, hash, name}` rows |
+| `get_recipe(uid)` | Get full locally cached recipe details by UID |
+| `search_recipes(query, limit?)` | Search locally cached recipes |
 | `list_categories` | List all recipe categories |
+| `list_recipe_photos(recipe_uid?)` | List cached recipe photo metadata without image binaries |
 | `list_grocery_lists` | List all grocery lists |
 | `list_grocery_items(list_uid, include_checked?)` | List grocery items for a specific list |
 | `list_meal_plans(start_date?, end_date?)` | List meal plan entries, optionally filtered by date |
@@ -132,12 +136,55 @@ $HOME/.local/bin/paprika-mcp --help
 
 - Config: `~/Library/Application Support/paprika-mcp/config.toml`
 - Token cache: `~/Library/Application Support/paprika-mcp/.paprika_token.json`
+- SQLite cache: `~/Library/Application Support/paprika-mcp/paprika.sqlite`
 - Stdout log: `~/Library/Logs/paprika-mcp.out.log`
 - Stderr log: `~/Library/Logs/paprika-mcp.err.log`
 
+Environment variables:
+
+- `PAPRIKA_EMAIL`: Paprika account email
+- `PAPRIKA_PASSWORD`: Paprika account password
+- `PAPRIKA_HOST`: HTTP bind host for the MCP server, defaults to `127.0.0.1`
+- `PAPRIKA_PORT`: HTTP bind port for the MCP server, defaults to `8000`
+- `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory; relative paths resolve from the current working directory
+- `PAPRIKA_USER_AGENT`: Paprika API User-Agent, defaults to `Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
+- `PAPRIKA_MAX_RETRIES`: Retry count for retryable `503` responses, defaults to `3`
+- `PAPRIKA_RETRY_BACKOFF_BASE`: Initial retry delay in seconds, defaults to `1.0`
+- `PAPRIKA_RETRY_BACKOFF_MAX`: Maximum retry delay in seconds, defaults to `30.0`
+- `PAPRIKA_RETRY_JITTER`: Added random retry jitter in seconds, defaults to `0.25`
+
+Recipe tools read from SQLite to reduce Paprika sync API calls. Run
+`sync_recipes` or `sync_now` to populate or refresh the local cache. The sync
+checks `/v2/sync/status/`, skips unchanged resource groups, uses Paprika's
+lightweight `{uid, hash}` recipe list, and fetches full recipe data only for
+recipes that are new or changed. Recipe detail progress is checkpointed after
+each stored recipe so interrupted syncs resume without refetching completed
+details. If the sync status request fails after retries, `sync_now` falls back
+to ungated sync and reports the status error in its summary.
+
+The local cache schema mirrors Paprika sync resources with per-resource tables
+for recipes, recipe categories, recipe photos, grocery lists/items/aisles/
+ingredients, meal plans/types, menus/items, bookmarks, and pantry items. Rows
+include Paprika-style sync state columns such as `status`, `is_synced`, and
+`sync_hash` where applicable. Stored resource revisions and pending
+recipe-detail counts are visible through
+`get_local_sync_status`. Photo sync stores metadata such as filename, photo
+hash, recipe UID, download/upload flags, and error fields; default sync does not
+download image binaries.
+
+Local write payloads generate fresh Paprika-compatible `sync_hash` values as
+uppercase SHA256 hex digests of fresh uppercase UUID4 strings. Generate a new
+value for local create/modify operations, then keep any server-provided value
+after a successful sync.
+
+The MCP client sends Paprika-compatible request headers by default:
+`User-Agent: Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
+and `Accept-Encoding: gzip, deflate`. The User-Agent can also be set as
+`user_agent` under the `[paprika]` config section.
+
 ### Notes
 
-- Mostly read-only; `add_grocery_item` is the only write tool
+- Mostly read-only; `sync_recipes`, `sync_now`, and `add_grocery_item` are the only write tools
 - The Paprika API is unofficial and undocumented; see [`API_REFERENCE.md`](./API_REFERENCE.md) for details
 - Tokens are cached on disk and refreshed automatically on 401
 
