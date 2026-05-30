@@ -11,8 +11,6 @@ from typing import Any, Iterable
 from .client import PaprikaRetryExhausted
 
 
-SCHEMA_VERSION = 4
-
 DEFAULT_ROW_STATUS = "unmodified"
 DEFAULT_IS_SYNCED = 1
 
@@ -318,89 +316,6 @@ class PaprikaLocalStore:
                 CREATE INDEX IF NOT EXISTS idx_resources_kind_name
                     ON resources(kind, name);
                 """
-            )
-            self._migrate_schema(conn)
-            self._set_metadata(conn, "schema_version", str(SCHEMA_VERSION))
-
-    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
-        previous_version = self._schema_version(conn)
-        self._ensure_columns(
-            conn,
-            "recipes",
-            {
-                "status": "TEXT NOT NULL DEFAULT 'unmodified'",
-                "is_synced": "INTEGER NOT NULL DEFAULT 1",
-                "sync_hash": "TEXT",
-            },
-        )
-        self._ensure_columns(
-            conn,
-            "resources",
-            {
-                "status": "TEXT NOT NULL DEFAULT 'unmodified'",
-                "is_synced": "INTEGER NOT NULL DEFAULT 1",
-                "sync_hash": "TEXT",
-            },
-        )
-        self._ensure_columns(
-            conn,
-            "recipe_photos",
-            {
-                "download_error_message": "TEXT",
-                "is_download_errored": "INTEGER NOT NULL DEFAULT 0",
-                "is_pending_deletion": "INTEGER NOT NULL DEFAULT 0",
-            },
-        )
-        if previous_version < 2:
-            self._migrate_legacy_resources(conn)
-
-    def _schema_version(self, conn: sqlite3.Connection) -> int:
-        try:
-            row = conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'schema_version'"
-            ).fetchone()
-            return int(row["value"]) if row else 0
-        except Exception:
-            return 0
-
-    def _ensure_columns(
-        self,
-        conn: sqlite3.Connection,
-        table: str,
-        columns: dict[str, str],
-    ) -> None:
-        existing = {
-            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        for name, definition in columns.items():
-            if name in existing:
-                continue
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
-
-    def _migrate_legacy_resources(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            """
-            SELECT kind, uid, name, raw_json, synced_at, status, is_synced, sync_hash
-            FROM resources
-            """
-        ).fetchall()
-        for row in rows:
-            table = RESOURCE_TABLES.get(row["kind"])
-            if not table:
-                continue
-            item = parse_json(row["raw_json"])
-            if not isinstance(item, dict):
-                item = {"uid": row["uid"], "name": row["name"]}
-            self._upsert_resource_row(
-                conn,
-                row["kind"],
-                item,
-                row["synced_at"],
-                uid=row["uid"],
-                raw_json=row["raw_json"],
-                status=row["status"],
-                is_synced=row["is_synced"],
-                sync_hash=row["sync_hash"],
             )
 
     def sync_recipes(self, client: Any) -> RecipeSyncSummary:

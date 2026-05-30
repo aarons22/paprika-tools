@@ -161,13 +161,12 @@ recipes that are new or changed. Recipe detail progress is checkpointed after
 each stored recipe so interrupted syncs resume without refetching completed
 details.
 
-The local cache uses a migrated schema that keeps current MCP reads stable while
-mirroring Paprika sync resources more closely. It stores per-resource tables for
-recipes, recipe categories, recipe photos, grocery lists/items/aisles/
+The local cache schema mirrors Paprika sync resources with per-resource tables
+for recipes, recipe categories, recipe photos, grocery lists/items/aisles/
 ingredients, meal plans/types, menus/items, bookmarks, and pantry items. Rows
 include Paprika-style sync state columns such as `status`, `is_synced`, and
-`sync_hash` where applicable; existing cache databases migrate in place. Stored
-resource revisions and pending recipe-detail counts are visible through
+`sync_hash` where applicable. Stored resource revisions and pending
+recipe-detail counts are visible through
 `get_local_sync_status`. Photo sync stores metadata such as filename, photo
 hash, recipe UID, download/upload flags, and error fields; default sync does not
 download image binaries.

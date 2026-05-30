@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -351,72 +350,6 @@ def test_schema_has_paprika_resource_tables_and_sync_fields(tmp_path: Path) -> N
     assert table_count(db_path, "grocery_items") == 3
     assert table_count(db_path, "meals") == 2
     assert table_count(db_path, "recipes_to_categories") == 1
-
-
-def test_existing_generic_resource_cache_migrates_to_specific_tables(tmp_path: Path) -> None:
-    db_path = tmp_path / "paprika.sqlite"
-    synced_at = "2026-05-29T12:00:00+00:00"
-    category = {"uid": "c1", "name": "Breakfast"}
-
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE sync_metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE recipes (
-                uid TEXT PRIMARY KEY,
-                hash TEXT,
-                name TEXT,
-                ingredients TEXT,
-                directions TEXT,
-                description TEXT,
-                nutritional_info TEXT,
-                servings TEXT,
-                difficulty TEXT,
-                prep_time TEXT,
-                cook_time TEXT,
-                rating INTEGER,
-                source TEXT,
-                source_url TEXT,
-                photo TEXT,
-                photo_hash TEXT,
-                image_url TEXT,
-                categories_json TEXT NOT NULL DEFAULT '[]',
-                raw_json TEXT NOT NULL,
-                in_trash INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT,
-                updated_at TEXT,
-                synced_at TEXT NOT NULL
-            );
-            CREATE TABLE resources (
-                kind TEXT NOT NULL,
-                uid TEXT NOT NULL,
-                name TEXT,
-                raw_json TEXT NOT NULL,
-                synced_at TEXT NOT NULL,
-                PRIMARY KEY (kind, uid)
-            );
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO resources (kind, uid, name, raw_json, synced_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("categories", "c1", "Breakfast", json.dumps(category), synced_at),
-        )
-
-    local = PaprikaLocalStore(db_path)
-
-    assert local.list_resources("categories") == [category]
-    assert table_count(db_path, "recipe_categories") == 1
-    assert {"status", "is_synced", "sync_hash"}.issubset(table_columns(db_path, "recipes"))
-    assert {"status", "is_synced", "sync_hash"}.issubset(
-        table_columns(db_path, "resources")
-    )
 
 
 def test_sync_all_uses_revision_gating_for_first_changed_and_unchanged_syncs(
