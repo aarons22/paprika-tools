@@ -23,10 +23,17 @@ DEFAULT_HEADERS = {
 class PaprikaRetryExhausted(RuntimeError):
     """Raised when retryable Paprika server-pressure responses keep failing."""
 
-    def __init__(self, status_code: int, attempts: int) -> None:
-        super().__init__(f"Paprika request failed with {status_code} after {attempts} attempts")
+    def __init__(
+        self,
+        status_code: int | None,
+        attempts: int,
+        last_error: Exception | None = None,
+    ) -> None:
+        reason = status_code if status_code is not None else last_error
+        super().__init__(f"Paprika request failed with {reason} after {attempts} attempts")
         self.status_code = status_code
         self.attempts = attempts
+        self.last_error = last_error
 
 
 class PaprikaClient:
@@ -130,7 +137,13 @@ class PaprikaClient:
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         attempts = self.max_retries + 1
         for attempt in range(attempts):
-            response = httpx.request(method, url, **kwargs)
+            try:
+                response = httpx.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt == self.max_retries:
+                    raise PaprikaRetryExhausted(None, attempts, exc) from exc
+                self._sleep(self._retry_delay(attempt))
+                continue
             if response.status_code != 503:
                 return response
             if attempt == self.max_retries:

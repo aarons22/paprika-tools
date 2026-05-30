@@ -164,6 +164,61 @@ def test_503_retry_budget_exhaustion(monkeypatch) -> None:
     assert sleeps == [0.1, 0.2]
 
 
+def test_transport_errors_retry_then_succeed(monkeypatch) -> None:
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def fake_request(method: str, url: str, **kwargs) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("temporary failure")
+        return response(json={"result": {"recipes": 1}})
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    client = PaprikaClient(
+        email="user@example.test",
+        password="secret",
+        max_retries=2,
+        retry_backoff_base=0.1,
+        retry_jitter=0,
+        sleep=sleeps.append,
+    )
+    client._token = "cached-token"
+
+    assert client.get_sync_status() == {"recipes": 1}
+    assert len(calls) == 2
+    assert sleeps == [0.1]
+
+
+def test_transport_error_retry_budget_exhaustion(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_request(method: str, url: str, **kwargs) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    client = PaprikaClient(
+        email="user@example.test",
+        password="secret",
+        max_retries=1,
+        retry_backoff_base=0,
+        retry_jitter=0,
+        sleep=lambda _: None,
+    )
+    client._token = "cached-token"
+
+    with pytest.raises(PaprikaRetryExhausted) as exc:
+        client.get_sync_status()
+
+    assert exc.value.status_code is None
+    assert exc.value.attempts == 2
+    assert isinstance(exc.value.last_error, httpx.ReadTimeout)
+    assert len(calls) == 2
+
+
 def test_create_grocery_item_sends_fresh_sync_hash(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 

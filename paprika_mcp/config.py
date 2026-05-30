@@ -111,7 +111,7 @@ def get_settings(overrides: Optional[Dict[str, str]] = None) -> Settings:
 
     resolved_db_path = Path(db_path).expanduser() if db_path else CONFIG_DIR / "paprika.sqlite"
     if not resolved_db_path.is_absolute():
-        resolved_db_path = CONFIG_DIR / resolved_db_path
+        resolved_db_path = Path.cwd() / resolved_db_path
 
     return Settings(
         paprika_email=email,

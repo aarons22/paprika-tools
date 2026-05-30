@@ -146,7 +146,7 @@ Environment variables:
 - `PAPRIKA_PASSWORD`: Paprika account password
 - `PAPRIKA_HOST`: HTTP bind host for the MCP server, defaults to `127.0.0.1`
 - `PAPRIKA_PORT`: HTTP bind port for the MCP server, defaults to `8000`
-- `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory
+- `PAPRIKA_DB_PATH`: SQLite cache path, defaults to `paprika.sqlite` in the config directory; relative paths resolve from the current working directory
 - `PAPRIKA_USER_AGENT`: Paprika API User-Agent, defaults to `Paprika Recipe Manager 3/3.3.1 (Microsoft Windows NT 10.0.26100.0)`
 - `PAPRIKA_MAX_RETRIES`: Retry count for retryable `503` responses, defaults to `3`
 - `PAPRIKA_RETRY_BACKOFF_BASE`: Initial retry delay in seconds, defaults to `1.0`
@@ -159,7 +159,8 @@ checks `/v2/sync/status/`, skips unchanged resource groups, uses Paprika's
 lightweight `{uid, hash}` recipe list, and fetches full recipe data only for
 recipes that are new or changed. Recipe detail progress is checkpointed after
 each stored recipe so interrupted syncs resume without refetching completed
-details.
+details. If the sync status request fails after retries, `sync_now` falls back
+to ungated sync and reports the status error in its summary.
 
 The local cache schema mirrors Paprika sync resources with per-resource tables
 for recipes, recipe categories, recipe photos, grocery lists/items/aisles/

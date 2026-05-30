@@ -331,6 +331,13 @@ class PaprikaLocalStore:
 
         with self._connect() as conn:
             local_hashes = self._local_hashes(conn)
+            if not remote_by_uid and local_hashes:
+                failures.append(
+                    {
+                        "uid": "",
+                        "error": "remote recipe list was empty; retained local cache",
+                    }
+                )
             unchanged = sum(
                 1
                 for uid, remote_hash in remote_by_uid.items()
@@ -340,25 +347,26 @@ class PaprikaLocalStore:
             pending_rows = self._pending_recipe_queue(conn)
 
         retry_exhausted = False
-        for row in pending_rows:
-            uid = row["uid"]
-            remote_hash = row["hash"]
-            try:
-                recipe = client.get_recipe(uid)
-            except PaprikaRetryExhausted as exc:
-                retry_exhausted = True
-                failures.append({"uid": uid, "error": str(exc)})
-                with self._connect() as conn:
+        with self._connect() as conn:
+            for row in pending_rows:
+                uid = row["uid"]
+                remote_hash = row["hash"]
+                try:
+                    recipe = client.get_recipe(uid)
+                except PaprikaRetryExhausted as exc:
+                    retry_exhausted = True
+                    failures.append({"uid": uid, "error": str(exc)})
                     self._mark_recipe_queue(conn, uid, "pending", str(exc))
-                break
-            except Exception as exc:
-                failures.append({"uid": uid, "error": str(exc)})
-                with self._connect() as conn:
+                    conn.commit()
+                    break
+                except Exception as exc:
+                    failures.append({"uid": uid, "error": str(exc)})
                     self._mark_recipe_queue(conn, uid, "failed", str(exc))
-                continue
-            with self._connect() as conn:
+                    conn.commit()
+                    continue
                 self._upsert_recipe(conn, uid, remote_hash, recipe, utc_now())
                 self._mark_recipe_queue(conn, uid, "complete", None)
+                conn.commit()
                 fetched += 1
 
         with self._connect() as conn:
@@ -396,13 +404,17 @@ class PaprikaLocalStore:
         )
 
     def sync_all(self, client: Any) -> dict[str, Any]:
-        remote_revisions = self._remote_revisions(client)
+        remote_revisions, revision_error = self._remote_revisions(client)
         resources: dict[str, dict[str, Any]] = {}
 
         recipe_revision = remote_revisions.get("recipes")
-        if recipe_revision is not None and self._revision_unchanged(
-            "recipes", recipe_revision
-        ) and not self._has_unfinished_recipes():
+        with self._connect() as conn:
+            skip_recipes = (
+                recipe_revision is not None
+                and self._revision_unchanged(conn, "recipes", recipe_revision)
+                and not self._has_unfinished_recipes(conn)
+            )
+        if skip_recipes:
             recipes = self._skipped_recipe_summary()
         else:
             recipes = self.sync_recipes(client)
@@ -414,8 +426,13 @@ class PaprikaLocalStore:
             if method is None:
                 continue
             revision = remote_revisions.get(revision_name)
-            if revision is not None and self._revision_unchanged(revision_name, revision):
-                resources[kind] = {"count": self._resource_count(kind), "skipped": True}
+            with self._connect() as conn:
+                skip_resource = revision is not None and self._revision_unchanged(
+                    conn, revision_name, revision
+                )
+                cached_count = self._resource_count(kind, conn) if skip_resource else None
+            if skip_resource:
+                resources[kind] = {"count": cached_count, "skipped": True}
                 continue
             resources[kind] = self.replace_resources(kind, method())
             if revision is not None:
@@ -433,6 +450,7 @@ class PaprikaLocalStore:
                 "failures": recipes.failures,
             },
             "resources": resources,
+            "revision_status_error": revision_error,
         }
 
     def _prepare_recipe_queue(
@@ -443,11 +461,14 @@ class PaprikaLocalStore:
         now: str,
     ) -> None:
         remote_uids = set(remote_by_uid)
-        conn.execute(
-            "DELETE FROM recipe_sync_queue WHERE uid NOT IN (%s)"
-            % ",".join("?" for _ in remote_uids),
-            tuple(remote_uids),
-        ) if remote_uids else conn.execute("DELETE FROM recipe_sync_queue")
+        if remote_uids:
+            placeholders = placeholders_for(remote_uids)
+            conn.execute(
+                f"DELETE FROM recipe_sync_queue WHERE uid NOT IN ({placeholders})",
+                tuple(remote_uids),
+            )
+        else:
+            conn.execute("DELETE FROM recipe_sync_queue")
         for uid, remote_hash in remote_by_uid.items():
             if uid in local_hashes and local_hashes[uid] == remote_hash:
                 self._mark_recipe_queue(conn, uid, "complete", None, remote_hash)
@@ -523,20 +544,19 @@ class PaprikaLocalStore:
             ).fetchone()["count"]
         )
 
-    def _has_unfinished_recipes(self) -> bool:
-        with self._connect() as conn:
-            return (
-                int(
-                    conn.execute(
-                        """
-                        SELECT count(*) AS count
-                        FROM recipe_sync_queue
-                        WHERE status IN ('pending', 'failed')
-                        """
-                    ).fetchone()["count"]
-                )
-                > 0
+    def _has_unfinished_recipes(self, conn: sqlite3.Connection) -> bool:
+        return (
+            int(
+                conn.execute(
+                    """
+                    SELECT count(*) AS count
+                    FROM recipe_sync_queue
+                    WHERE status IN ('pending', 'failed')
+                    """
+                ).fetchone()["count"]
             )
+            > 0
+        )
 
     def _skipped_recipe_summary(self) -> RecipeSyncSummary:
         with self._connect() as conn:
@@ -556,27 +576,31 @@ class PaprikaLocalStore:
             failures=[],
         )
 
-    def _remote_revisions(self, client: Any) -> dict[str, int]:
+    def _remote_revisions(self, client: Any) -> tuple[dict[str, int], str | None]:
         get_sync_status = getattr(client, "get_sync_status", None)
         if get_sync_status is None:
-            return {}
-        status = get_sync_status()
+            return {}, None
+        try:
+            status = get_sync_status()
+        except Exception as exc:
+            return {}, str(exc)
         if not isinstance(status, dict):
-            return {}
+            return {}, "sync status response was not an object"
         revisions: dict[str, int] = {}
         for name, revision in status.items():
             try:
                 revisions[str(name)] = int(revision)
             except (TypeError, ValueError):
                 continue
-        return revisions
+        return revisions, None
 
-    def _revision_unchanged(self, name: str, revision: int) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT revision FROM sync_status WHERE name = ?",
-                (name,),
-            ).fetchone()
+    def _revision_unchanged(
+        self, conn: sqlite3.Connection, name: str, revision: int
+    ) -> bool:
+        row = conn.execute(
+            "SELECT revision FROM sync_status WHERE name = ?",
+            (name,),
+        ).fetchone()
         return bool(row and int(row["revision"]) == revision)
 
     def _set_revision(self, name: str, revision: int) -> None:
@@ -842,18 +866,25 @@ class PaprikaLocalStore:
             "last_recipe_sync_summary": parse_json(metadata.get("last_recipe_sync_summary")),
         }
 
-    def _resource_count(self, kind: str) -> int:
+    def _resource_count(
+        self, kind: str, conn: sqlite3.Connection | None = None
+    ) -> int:
+        if conn is not None:
+            return self._resource_count_with_conn(conn, kind)
+        with self._connect() as local_conn:
+            return self._resource_count_with_conn(local_conn, kind)
+
+    def _resource_count_with_conn(self, conn: sqlite3.Connection, kind: str) -> int:
         table = RESOURCE_TABLES.get(kind)
-        with self._connect() as conn:
-            if table:
-                return int(
-                    conn.execute(f"SELECT count(*) AS count FROM {table}").fetchone()["count"]
-                )
+        if table:
             return int(
-                conn.execute(
-                    "SELECT count(*) AS count FROM resources WHERE kind = ?", (kind,)
-                ).fetchone()["count"]
+                conn.execute(f"SELECT count(*) AS count FROM {table}").fetchone()["count"]
             )
+        return int(
+            conn.execute(
+                "SELECT count(*) AS count FROM resources WHERE kind = ?", (kind,)
+            ).fetchone()["count"]
+        )
 
     def _local_hashes(self, conn: sqlite3.Connection) -> dict[str, str | None]:
         rows = conn.execute("SELECT uid, hash FROM recipes").fetchall()
@@ -1015,11 +1046,9 @@ class PaprikaLocalStore:
     def _remove_missing(self, conn: sqlite3.Connection, remote_uids: Iterable[str]) -> int:
         remote_uid_list = list(remote_uids)
         if not remote_uid_list:
-            row = conn.execute("SELECT count(*) AS count FROM recipes").fetchone()
-            conn.execute("DELETE FROM recipes")
-            return int(row["count"])
+            return 0
 
-        placeholders = ",".join("?" for _ in remote_uid_list)
+        placeholders = placeholders_for(remote_uid_list)
         row = conn.execute(
             f"SELECT count(*) AS count FROM recipes WHERE uid NOT IN ({placeholders})",
             remote_uid_list,
@@ -1092,3 +1121,7 @@ def resource_uid(item: dict[str, Any], raw_json: str) -> str:
     if uid:
         return str(uid)
     return sha256(raw_json.encode("utf-8")).hexdigest()
+
+
+def placeholders_for(values: Iterable[Any]) -> str:
+    return ",".join("?" for _ in values)

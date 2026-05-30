@@ -53,6 +53,7 @@ to the underlying API. Meal-plan writes are intentionally not exposed.
 - `sync_now` stores remote resource revisions and skips unchanged groups on later runs.
 - `sync_recipes` checkpoints recipe detail progress in `recipe_sync_queue`; summaries include `fetched`, `skipped`, `pending`, and `failed` counts.
 - `list_recipe_photos(recipe_uid?)` exposes cached photo metadata only; default sync does not download image binaries.
+- If `/v2/sync/status/` fails after retries, `sync_now` proceeds without revision gating and reports `revision_status_error`.
 
 ---
 
@@ -562,9 +563,11 @@ Authorization: Bearer <token>
 
 ### Retry and Resume Behavior
 
-Paprika can return transient `503` responses during large syncs. The MCP client
-retries `503` responses with exponential backoff and jitter. Defaults can be
-overridden in the `[paprika]` config section or environment:
+Paprika can return transient `503` responses during large syncs, and long syncs
+can also hit transient transport errors such as connection failures or read
+timeouts. The MCP client retries those failures with exponential backoff and
+jitter. Defaults can be overridden in the `[paprika]` config section or
+environment:
 
 | Setting | Environment | Default |
 |---|---|---|

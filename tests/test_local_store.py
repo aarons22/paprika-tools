@@ -96,6 +96,11 @@ class RetryExhaustedPaprikaClient(FakePaprikaClient):
         raise PaprikaRetryExhausted(503, 3)
 
 
+class FailingStatusPaprikaClient(FakePaprikaClient):
+    def get_sync_status(self) -> dict[str, int]:
+        raise PaprikaRetryExhausted(503, 3)
+
+
 class PhotoPaprikaClient(FakePaprikaClient):
     def __init__(self, stubs: list[dict], recipes: dict[str, dict]) -> None:
         super().__init__(stubs, recipes)
@@ -243,6 +248,25 @@ def test_sync_removes_recipes_missing_from_remote_list(tmp_path: Path) -> None:
     )
 
     assert summary.removed == 1
+    assert local.list_recipes() == [{"uid": "r1", "hash": "h1", "name": "Pancakes"}]
+
+
+def test_empty_remote_recipe_list_does_not_delete_existing_cache(tmp_path: Path) -> None:
+    local = store(tmp_path)
+    local.sync_recipes(
+        FakePaprikaClient(
+            [{"uid": "r1", "hash": "h1"}],
+            {"r1": recipe("r1", "Pancakes")},
+        )
+    )
+
+    summary = local.sync_recipes(FakePaprikaClient([], {}))
+
+    assert summary.removed == 0
+    assert summary.failed == 1
+    assert summary.failures == [
+        {"uid": "", "error": "remote recipe list was empty; retained local cache"}
+    ]
     assert local.list_recipes() == [{"uid": "r1", "hash": "h1", "name": "Pancakes"}]
 
 
@@ -460,6 +484,25 @@ def test_retry_exhaustion_preserves_pending_recipe_progress(tmp_path: Path) -> N
     assert second.pending == 0
     assert resumed.get_recipe_calls == ["r1"]
     assert local.get_recipe("r1")["name"] == "Pancakes"
+
+
+def test_sync_all_falls_back_to_ungated_sync_when_status_fails(tmp_path: Path) -> None:
+    local = store(tmp_path)
+    client = FailingStatusPaprikaClient(
+        [{"uid": "r1", "hash": "h1"}],
+        {"r1": recipe("r1", "Pancakes")},
+    )
+
+    summary = local.sync_all(client)
+
+    assert summary["revision_status_error"] == "Paprika request failed with 503 after 3 attempts"
+    assert summary["recipes"]["fetched"] == 1
+    assert summary["resources"] == {
+        "categories": {"count": 1},
+        "grocery_lists": {"count": 1},
+        "grocery_items": {"count": 3},
+        "meal_plans": {"count": 2},
+    }
 
 
 def test_sync_now_stores_photo_metadata_without_downloading_binaries(

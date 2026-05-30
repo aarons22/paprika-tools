@@ -17,3 +17,16 @@ def test_retry_settings_can_be_configured_from_environment(monkeypatch) -> None:
     assert settings.paprika_retry_backoff_base == 0.5
     assert settings.paprika_retry_backoff_max == 5.0
     assert settings.paprika_retry_jitter == 0.1
+
+
+def test_relative_db_path_resolves_from_current_directory(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = get_settings(
+        {
+            "email": "user@example.test",
+            "password": "secret",
+            "db_path": "data/paprika.sqlite",
+        }
+    )
+
+    assert settings.paprika_db_path == tmp_path / "data" / "paprika.sqlite"
