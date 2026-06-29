@@ -55,6 +55,7 @@ paprika groceries listGroceryItems       # all grocery items across all lists
 paprika groceries createGroceryItems     # add or update grocery items (gzip multipart)
 
 paprika meals listMealPlans              # full meal calendar
+paprika meals createMealPlans            # add or update meal plan entries (gzip multipart)
 
 paprika pantry listPantryItems           # pantry inventory
 

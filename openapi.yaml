@@ -504,6 +504,10 @@ components:
           type: boolean
           description: Whether this is an ingredient entry rather than a full recipe.
           default: false
+        deleted:
+          type: boolean
+          description: Soft-delete flag. Set true and POST the update to remove an entry.
+          default: false
 
     MealPlanListResult:
       type: object
@@ -512,6 +516,20 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/MealPlan'
+
+    MealPlanUploadBody:
+      type: object
+      description: >
+        Multipart form upload for creating or updating meal plan entries.
+        The `data` field must contain a gzip-compressed JSON array of MealPlan
+        objects. Client must generate a new UUID4 (uppercase) for each new entry.
+        Set `recipe_uid` to link a recipe, or null for a text-only meal.
+      required: [data]
+      properties:
+        data:
+          type: string
+          format: binary
+          description: Gzip-compressed JSON array of MealPlan objects.
 
     # --- Pantry ---
     PantryItem:
@@ -790,6 +808,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MealPlanListResult'
+
+    post:
+      operationId: createMealPlans
+      summary: Create or update meal plan entries
+      description: >
+        Creates or updates one or more meal plan entries. The request body must
+        be a gzip-compressed JSON array of MealPlan objects sent as
+        multipart/form-data. Client must generate a UUID4 (uppercase) for each
+        new entry. `date` uses "YYYY-MM-DD HH:MM:SS"; `type` is 0=Breakfast,
+        1=Lunch, 2=Dinner, 3=Snack. Set `recipe_uid` to link a recipe, or null
+        for a text-only meal.
+
+        Note: unlike recipes, meals have no per-uid endpoint — always POST to
+        /meals/ with an array (the per-uid form returns 404).
+
+        Soft delete: set `deleted: true` and POST the update.
+      tags: [meals]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MealPlanUploadBody'
+      responses:
+        "200":
+          description: Meal plan entries created or updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoolResult'
 
   # --- Pantry ---
   /pantry/:

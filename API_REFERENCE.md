@@ -293,6 +293,49 @@ Authorization: Bearer <token>
 | 2           | dinner    | Evening meals |
 | 3           | snack     | Snacks/appetizers |
 
+#### Create/Update Meal Plan Entries
+**Request:**
+```http
+POST /v2/sync/meals/
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+
+data: <gzip-compressed JSON array>
+```
+
+**Request Data (before gzip compression):**
+```json
+[
+  {
+    "uid": "E22C871B-35AA-46E3-97AC-40ABCADFACDE",
+    "recipe_uid": "000B8FB8-1F7E-4E5B-9391-3547E2BFE45F-60797-00000EB1DC229E2E",
+    "date": "2026-07-05 00:00:00",
+    "type": 2,
+    "name": "Slow Cooker Cinnamon Applesauce",
+    "order_flag": 0,
+    "type_uid": "",
+    "scale": null,
+    "is_ingredient": false,
+    "deleted": false
+  }
+]
+```
+
+**Response:**
+```json
+{ "result": true }
+```
+
+**Notes (verified live 2026-06-29 against a real account):**
+1. Data must be gzip-compressed JSON **array** (not a bare object), like groceries.
+2. Send as `multipart/form-data` with field name `data`.
+3. Client must generate a **UUID4 (uppercase)** for each new entry.
+4. **There is no per-uid endpoint.** `POST /v2/sync/meals/{uid}/` returns `404 Not found.` — always POST the array to `/v2/sync/meals/`.
+5. `date` uses `"YYYY-MM-DD HH:MM:SS"`; `type` is 0=Breakfast, 1=Lunch, 2=Dinner, 3=Snack.
+6. Set `recipe_uid` to link a recipe, or `null` for a text-only meal.
+
+**Soft Delete:** Set `deleted: true` on the entry and POST the array again.
+
 ---
 
 ### Recipes
