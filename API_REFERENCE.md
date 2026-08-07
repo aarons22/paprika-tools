@@ -31,6 +31,13 @@ For high-level implementation patterns and sync logic, refer to `./CLAUDE.md`.
 These tools are intentionally curated for agent workflows and are not a 1:1 mapping
 to the underlying API. Pantry, category, menu and photo writes are not exposed.
 
+**Rate limiting:** Paprika publishes no rate limits, so `PaprikaClient` paces itself:
+every request (any instance, process-wide) is spaced at least `MIN_REQUEST_INTERVAL`
+(0.5s) apart, and 429/5xx answers are retried up to `MAX_ATTEMPTS` (3) times honouring
+`Retry-After` when present (else 1s/2s/4s backoff). Exhausted 429s raise
+`PaprikaAPIError` with the suggested wait so calling agents can pace themselves
+instead of blind-retrying.
+
 **Read helpers:**
 - `get_meals_for_date(date)` - Return meal plan entries for a specific `YYYY-MM-DD` date with `meal_type_name` added.
 

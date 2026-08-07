@@ -145,6 +145,7 @@ $HOME/.local/bin/paprika-mcp --help
 - Paprika has no true delete endpoints — deletes are soft: `purchased=true` (groceries), `in_trash=true` (recipes), `deleted=true` (meal plans)
 - The Paprika API is unofficial and undocumented; see [`API_REFERENCE.md`](./API_REFERENCE.md) for details
 - Tokens are cached on disk and refreshed automatically on 401
+- All API traffic is paced client-side (min 0.5s between requests, shared across the whole process) with `Retry-After`-aware backoff on 429/5xx — the Paprika API is unofficial and publishes no rate limits
 - `scripts/smoke_test_writes.py` exercises every write tool against the live account and cleans up after itself: `.venv/bin/python scripts/smoke_test_writes.py`
 
 ---

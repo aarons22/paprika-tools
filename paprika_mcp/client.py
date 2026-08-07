@@ -1,6 +1,8 @@
 import base64
 import gzip
 import json
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -9,17 +11,28 @@ import httpx
 
 BASE_URL = "https://www.paprikaapp.com/api"
 
+# The Paprika API is unofficial and publishes no rate limits; pace all
+# traffic so agent-driven bursts can't hammer it.
+MIN_REQUEST_INTERVAL = 0.5  # seconds between any two requests, process-wide
+MAX_ATTEMPTS = 3  # total tries for a request answered with 429 or 5xx
+
 
 class PaprikaAPIError(RuntimeError):
-    """The API returned HTTP 200 with an error payload instead of a result.
+    """The API refused the call in-band rather than with a transport error.
 
-    Paprika signals some failures (e.g. an unknown recipe uid) in the body
-    rather than the status code: `{"error": {"code": 0, "message": "..."}}`.
+    Paprika signals some failures (e.g. an unknown recipe uid) with HTTP 200
+    and an error body: `{"error": {"code": 0, "message": "..."}}`. Also raised
+    when the API keeps returning 429 after MAX_ATTEMPTS paced retries.
     """
 
 
 class PaprikaClient:
     """HTTP client for the Paprika Recipe Manager API."""
+
+    # Shared across instances: the MCP server constructs a fresh client per
+    # tool call, so per-instance state would never actually throttle.
+    _pace_lock = threading.Lock()
+    _last_request_at = 0.0
 
     def __init__(self, email: str, password: str, token_cache_path: Path | None = None) -> None:
         self.email = email
@@ -53,8 +66,28 @@ class PaprikaClient:
             # Best-effort cache; auth still works without it.
             return
 
+    def _pace(self) -> None:
+        """Block until MIN_REQUEST_INTERVAL has passed since the last request by any instance."""
+        with PaprikaClient._pace_lock:
+            wait = PaprikaClient._last_request_at + MIN_REQUEST_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            PaprikaClient._last_request_at = time.monotonic()
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float:
+        """Server-suggested wait when given, else exponential backoff (1s, 2s, 4s)."""
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(float(retry_after), 1.0)
+            except ValueError:
+                pass  # HTTP-date form; fall back to backoff
+        return float(2**attempt)
+
     def _authenticate(self) -> str:
         """Obtain a bearer token using V1 Basic Auth + form data login."""
+        self._pace()
         credentials = base64.b64encode(f"{self.email}:{self.password}".encode()).decode()
         response = httpx.post(
             f"{BASE_URL}/v1/account/login/",
@@ -76,24 +109,42 @@ class PaprikaClient:
         return self._token  # type: ignore[return-value]
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
-        """Make an authenticated request, retrying once on 401."""
-        token = self._get_token()
-        response = httpx.request(
-            method,
-            f"{BASE_URL}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-            **kwargs,
-        )
-        if response.status_code == 401:
-            self._token = None
-            token = self._authenticate()
+        """Make an authenticated, paced request.
+
+        Retries once on 401 (re-auth), and retries 429/5xx answers with a
+        Retry-After-aware backoff before giving up.
+        """
+        for attempt in range(MAX_ATTEMPTS):
+            self._pace()
+            token = self._get_token()
             response = httpx.request(
                 method,
                 f"{BASE_URL}{path}",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=30,
                 **kwargs,
+            )
+            if response.status_code == 401:
+                self._token = None
+                token = self._authenticate()
+                self._pace()
+                response = httpx.request(
+                    method,
+                    f"{BASE_URL}{path}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=30,
+                    **kwargs,
+                )
+            if response.status_code != 429 and response.status_code < 500:
+                break
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(self._retry_delay(response, attempt))
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            hint = f"{retry_after} seconds" if retry_after else "a short wait"
+            raise PaprikaAPIError(
+                f"Paprika API rate limited (HTTP 429) after {MAX_ATTEMPTS} attempts; "
+                f"retry after {hint} or reduce call frequency"
             )
         response.raise_for_status()
 
