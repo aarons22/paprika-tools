@@ -10,6 +10,14 @@ import httpx
 BASE_URL = "https://www.paprikaapp.com/api"
 
 
+class PaprikaAPIError(RuntimeError):
+    """The API returned HTTP 200 with an error payload instead of a result.
+
+    Paprika signals some failures (e.g. an unknown recipe uid) in the body
+    rather than the status code: `{"error": {"code": 0, "message": "..."}}`.
+    """
+
+
 class PaprikaClient:
     """HTTP client for the Paprika Recipe Manager API."""
 
@@ -94,6 +102,15 @@ class PaprikaClient:
             content = gzip.decompress(content)
         return json.loads(content)
 
+    def _gzip_upload(self, path: str, payload: dict | list) -> dict:
+        """POST gzip-compressed JSON as multipart/form-data field `data`.
+
+        Every Paprika write endpoint uses this shape. Recipes take a single
+        object; groceries and meals take an array.
+        """
+        data = gzip.compress(json.dumps(payload).encode("utf-8"))
+        return self._request("POST", path, files={"data": ("data", data)})
+
     # --- Public API methods ---
 
     def get_sync_status(self) -> dict:
@@ -105,8 +122,16 @@ class PaprikaClient:
         return self._request("GET", "/v2/sync/recipes/")["result"]
 
     def get_recipe(self, uid: str) -> dict:
-        """Return full details for a single recipe by UID."""
-        return self._request("GET", f"/v2/sync/recipe/{uid}/")["result"]
+        """Return full details for a single recipe by UID.
+
+        Raises PaprikaAPIError if the recipe does not exist — the API answers
+        with HTTP 200 and an error body rather than a 404.
+        """
+        payload = self._request("GET", f"/v2/sync/recipe/{uid}/")
+        if "result" not in payload:
+            error = payload.get("error") or {}
+            raise PaprikaAPIError(error.get("message") or f"get_recipe({uid}) failed")
+        return payload["result"]
 
     def list_categories(self) -> list:
         """Return all recipe categories."""
@@ -151,9 +176,31 @@ class PaprikaClient:
             "separate": separate,
             "list_uid": list_uid,
         }
-        payload = gzip.compress(json.dumps([item]).encode("utf-8"))
-        return self._request(
-            "POST",
-            "/v2/sync/groceries/",
-            files={"data": ("data", payload)},
-        )
+        return self._gzip_upload("/v2/sync/groceries/", [item])
+
+    def update_grocery_item(self, item: dict) -> dict:
+        """Update an existing grocery item.
+
+        The item must be a full grocery object (as returned by
+        `list_grocery_items`). Soft-delete by setting `purchased` to true —
+        the API has no true delete endpoint for grocery items.
+        """
+        return self._gzip_upload("/v2/sync/groceries/", [item])
+
+    def upsert_recipe(self, uid: str, recipe: dict) -> dict:
+        """Create or update a single recipe.
+
+        `recipe` must be the full recipe object (all fields present) — the
+        endpoint replaces the stored recipe rather than merging. Soft-delete by
+        setting `in_trash` to true; there is no true delete endpoint.
+        """
+        return self._gzip_upload(f"/v2/sync/recipe/{uid}/", recipe)
+
+    def create_meal_plans(self, meals: list[dict]) -> dict:
+        """Create or update meal plan entries.
+
+        Always POSTs the array to `/v2/sync/meals/` — there is no per-uid
+        endpoint (it returns 404). Soft-delete by setting `deleted` to true on
+        an entry and posting it again.
+        """
+        return self._gzip_upload("/v2/sync/meals/", meals)

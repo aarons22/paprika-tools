@@ -128,6 +128,9 @@ $HOME/.local/bin/paprika-mcp --help
 | `list_meal_plans(start_date?, end_date?)` | List meal plan entries, optionally filtered by date |
 | `get_meals_for_date(date)` | Get meal plan entries for a specific date |
 | `add_grocery_item(list_uid, name, ...)` | Add a grocery item to a specific list |
+| `delete_grocery_item(item_uid)` | Delete a grocery item (soft delete — sets `purchased`) |
+| `upsert_recipe(name, ..., uid?, in_trash?)` | Create or update a recipe; `in_trash=True` soft-deletes |
+| `create_meal_plans(meals)` | Create, update, or soft-delete meal plan entries |
 
 ### Config & Logs
 
@@ -138,9 +141,11 @@ $HOME/.local/bin/paprika-mcp --help
 
 ### Notes
 
-- Mostly read-only; `add_grocery_item` is the only write tool
+- Write tools: `add_grocery_item`, `delete_grocery_item`, `upsert_recipe`, `create_meal_plans`. Each write is read back from the API before returning, so a successful response is a verified write
+- Paprika has no true delete endpoints — deletes are soft: `purchased=true` (groceries), `in_trash=true` (recipes), `deleted=true` (meal plans)
 - The Paprika API is unofficial and undocumented; see [`API_REFERENCE.md`](./API_REFERENCE.md) for details
 - Tokens are cached on disk and refreshed automatically on 401
+- `scripts/smoke_test_writes.py` exercises every write tool against the live account and cleans up after itself: `.venv/bin/python scripts/smoke_test_writes.py`
 
 ---
 
