@@ -29,16 +29,58 @@ For high-level implementation patterns and sync logic, refer to `./CLAUDE.md`.
 ## MCP Tooling (Paprika)
 
 These tools are intentionally curated for agent workflows and are not a 1:1 mapping
-to the underlying API. Meal-plan writes are intentionally not exposed.
+to the underlying API. Pantry, category, menu and photo writes are not exposed.
+
+**Rate limiting:** Paprika publishes no rate limits, so `PaprikaClient` paces itself:
+every request (any instance, process-wide) is spaced at least `MIN_REQUEST_INTERVAL`
+(0.5s) apart, and 429/5xx answers are retried up to `MAX_ATTEMPTS` (3) times honouring
+`Retry-After` when present (else 1s/2s/4s backoff). Exhausted 429s raise
+`PaprikaAPIError` with the suggested wait so calling agents can pace themselves
+instead of blind-retrying.
 
 **Read helpers:**
 - `get_meals_for_date(date)` - Return meal plan entries for a specific `YYYY-MM-DD` date with `meal_type_name` added.
 
-**Writes (limited):**
+**Writes:**
+
+Every write tool reads the written data back from the API before returning, and raises
+rather than returning an unverified write. No write tool hard-deletes — Paprika has no
+true delete endpoints (see "No True Deletion" above).
+
 - `add_grocery_item(list_uid, name, quantity?, instruction?, purchased?, ingredient?, order_flag?, separate?, recipe_uid?)`
   - `list_uid` is required.
   - `ingredient` defaults to `name.lower()` when omitted.
   - `aisle` is always sent as an empty string to allow Paprika auto-assignment.
+- `delete_grocery_item(item_uid)`
+  - Soft delete: sets `purchased: true` and POSTs the item back to `/v2/sync/groceries/`.
+  - Raises `ValueError` if the uid is not present in `/v2/sync/groceries/`.
+  - Returns `{"deleted": true, "item": {...}}` with the item as re-fetched.
+- `upsert_recipe(name, ingredients?, directions?, description?, notes?, nutritional_info?, servings?, difficulty?, prep_time?, cook_time?, total_time?, rating?, categories?, tags?, source?, source_url?, image_url?, uid?, in_trash?)`
+  - Omit `uid` to create (uppercase UUID4 generated client-side); pass a known `uid` to
+    update; an unknown `uid` creates a recipe with that uid.
+  - On update the stored recipe is fetched first and only supplied arguments are overlaid,
+    so unset arguments keep their stored values and `created` is preserved. A text field
+    therefore cannot be cleared by passing `""`.
+  - `categories` are category **names**, not UIDs.
+  - `hash` is computed as `sha256(json.dumps(recipe_without_hash, sort_keys=True))`.
+  - `in_trash=True` soft-deletes; `in_trash=False` on a later update restores.
+  - POSTs the full object to the singular `/v2/sync/recipe/{uid}/` endpoint.
+  - Returns `{"created": bool, "recipe": {...}}` with the recipe as re-fetched.
+- `create_meal_plans(meals)` — `meals` is a list of `{date, type, name?, recipe_uid?, uid?, order_flag?, deleted?}`
+  - `type` accepts `0`-`3` or `"Breakfast"`/`"Lunch"`/`"Dinner"`/`"Snack"`; invalid values raise
+    `ValueError` before any network call.
+  - `date` accepts `YYYY-MM-DD` (normalised to `00:00:00`) or a full `YYYY-MM-DD HH:MM:SS`.
+  - Each entry requires `name` or `recipe_uid`; when only `recipe_uid` is given the display
+    name is filled in from the recipe.
+  - `uid` is generated per entry unless supplied; `deleted: true` requires a `uid` and
+    soft-deletes that entry (excluded from the created count).
+  - POSTs the array to `/v2/sync/meals/` (there is no per-uid endpoint).
+  - Returns `{"created": N, "deleted": N, "meals": [...]}` with entries as re-fetched.
+
+**Smoke test:**
+- `scripts/smoke_test_writes.py` exercises all four write tools against the live account
+  (create → update → readback → soft-delete) and cleans up after itself. Run it with the
+  repo venv: `.venv/bin/python scripts/smoke_test_writes.py`.
 
 **Core read tools:**
 - `get_sync_status`, `list_recipes`, `get_recipe`, `list_categories`, `list_grocery_lists`, `list_grocery_items`, `list_meal_plans`
@@ -154,6 +196,7 @@ Authorization: Bearer <token>
 **Tooling Note:**
 - The MCP tool `list_grocery_items` requires `list_uid` and filters by list; set `include_checked=true` to include purchased items.
 - The MCP tool `add_grocery_item` requires `list_uid`; when `ingredient` is omitted it defaults to `name.lower()` and `aisle` is left empty for auto-assignment.
+- The MCP tool `delete_grocery_item(item_uid)` soft-deletes by setting `purchased: true` and re-posting the item; it verifies the flag by re-fetching.
 
 #### Create/Update Grocery Items
 **Request:**
@@ -334,7 +377,13 @@ data: <gzip-compressed JSON array>
 5. `date` uses `"YYYY-MM-DD HH:MM:SS"`; `type` is 0=Breakfast, 1=Lunch, 2=Dinner, 3=Snack.
 6. Set `recipe_uid` to link a recipe, or `null` for a text-only meal.
 
-**Soft Delete:** Set `deleted: true` on the entry and POST the array again.
+**Soft Delete:** Set `deleted: true` on the entry and POST the array again. Deleted entries
+disappear from `GET /v2/sync/meals/` (verified live 2026-08-07).
+
+**Tooling Note:**
+- The MCP tool `create_meal_plans(meals)` wraps this endpoint: it normalises `type`
+  (`0`-`3` or the meal name) and `date` (`YYYY-MM-DD` → midnight), generates uids, posts the
+  array, and reads the entries back from `GET /v2/sync/meals/` before returning.
 
 ---
 
@@ -436,6 +485,7 @@ Authorization: Bearer <token>
 | `total_time` | `string` | `""` | Total time |
 | `rating` | `int` | `0` | Star rating (0=unrated, 1-5) |
 | `categories` | `list[string]` | `[]` | Category names |
+| `tags` | `list[string]` | `[]` | Free-form tags — accepted on write, not part of `openapi.yaml` |
 | `source` | `string` | `""` | Attribution / source name |
 | `source_url` | `string` | `""` | Original recipe URL |
 | `image_url` | `string` | `""` | External image URL |
@@ -488,6 +538,12 @@ data: <gzip-compressed JSON with in_trash=true>
 ```
 
 **Note:** No true DELETE endpoint exists for recipes.
+
+**Tooling Note:**
+- The MCP tool `upsert_recipe(...)` wraps this endpoint: it generates the uid for new
+  recipes, merges supplied fields over the stored recipe on update (preserving `created`,
+  photo fields and `hash` regeneration), and re-fetches the recipe to verify the write.
+  Pass `in_trash=True` to soft-delete.
 
 #### Recommended Sync Workflow
 
